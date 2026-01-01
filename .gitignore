@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Recording files
+recordings
+
+# Workflow results
+workflow_results
+
+# Debug screenshots
+debug_screenshots
+.env
+artifacts
