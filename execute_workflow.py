@@ -147,7 +147,7 @@ INPUT WORKFLOW (To be validated):
 VALIDATION RULES:
 1. The workflow MUST have exactly 9 steps (no more, no less)
 2. Steps must follow this exact sequence:
-   - Step 1: search (browser) - Any search query is allowed (make sure to change this query similar to input query so that it can be validated)
+   - Step 1: search (browser) - Any search query is allowed (**important** make sure to change this query (similar domain different query) to input query so that it can be validated)
    - Step 2: click_first_result (browser)
    - Step 3: extract_page_content (browser) - Generic content extraction (can be any extraction action like extract_page_content, etc.)
    - Step 4: launch_fullscreen (desktop) - TextEdit
