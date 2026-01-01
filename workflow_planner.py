@@ -1,6 +1,8 @@
 """
 Unified Workflow Planner v2 - Generates improved orchestrator-compatible workflows
 """
+import sys
+from pathlib import Path
 import json
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
@@ -29,7 +31,7 @@ class UnifiedEventAnalyzer:
     """Analyzes events and maintains chronological order"""
     
     # Browser window titles to detect
-    BROWSER_WINDOWS = ['Google Chrome', 'Chrome', 'Safari', 'Firefox', 'Edge', 'Brave']
+    BROWSER_WINDOWS = ['Google Chrome', 'Chrome']
     
     # Browser-specific event types
     BROWSER_EVENT_TYPES = ['navigation', 'page_load']
@@ -278,10 +280,10 @@ class UnifiedWorkflowPlanner:
                     if in_browser and navigated_to_site and not browser_session_ended:
                         print(f"Adding extraction step before switching to desktop")
                         self._add_step(
-                            action="extract_restaurants_from_html",
-                            args={"max_restaurants": 5},
+                            action="extract_page_content",
+                            args={"max_items": 5},
                             agent="browser",
-                            description="Extract restaurant information from the page",
+                            description="Extract Page Content",
                             retries=2,
                             delay_after=1.0,
                             timestamp=timestamp
@@ -342,16 +344,16 @@ class UnifiedWorkflowPlanner:
         
         # Add typing step with context-aware text
         if text_buffer or browser_session_ended:
-            # If we extracted restaurants, use formatted output
+            # If we extracted page content, use formatted output
             if browser_session_ended:
-                print(f"Adding typing step with restaurant extraction context")
+                print(f"Adding typing step with page content extraction context")
                 self._add_step(
                     action="type_text",
                     args={
-                        "text": "{{restaurants_formatted}}"  # Will be replaced by orchestrator
+                        "text": "{{page_content}}"  # Will be replaced by orchestrator
                     },
                     agent="desktop",
-                    description="Type extracted restaurant information",
+                    description="Type extracted page content",
                     retries=1,
                     delay_after=0.5
                 )
@@ -513,13 +515,23 @@ class UnifiedWorkflowPlanner:
                 "Uses prefer_position for desktop clicks",
                 "Filters out meta-searches (e.g., 'python activity recording')",
                 "Adds file validation after save",
-                "Better context-aware text typing"
+                "Better context-aware text typing",
+                "Filters out workflow control events (start/stop markers)"
             ]
         }
 
 
-def load_events_from_file(events_file: str) -> List[Dict]:
-    """Load events from JSONL file"""
+def load_events_from_file(events_file: str, filter_control_events: bool = True) -> List[Dict]:
+    """
+    Load events from JSONL file
+    
+    Args:
+        events_file: Path to events.jsonl file
+        filter_control_events: If True, filter out workflow_control events
+        
+    Returns:
+        List of events (without control events if filter_control_events=True)
+    """
     import os
     
     # Check if file exists
@@ -533,6 +545,8 @@ def load_events_from_file(events_file: str) -> List[Dict]:
     
     # Load events from JSONL file
     events = []
+    control_events = []
+    
     print(f"Reading events from: {events_file}")
     
     with open(events_file, 'r') as f:
@@ -541,6 +555,12 @@ def load_events_from_file(events_file: str) -> List[Dict]:
             if line:
                 try:
                     event = json.loads(line)
+                    
+                    # Filter out workflow control events
+                    if filter_control_events and event.get('event_type') == 'workflow_control':
+                        control_events.append(event)
+                        continue
+                    
                     events.append(event)
                 except json.JSONDecodeError as e:
                     print(f"Warning: Skipping invalid JSON line: {e}")
@@ -549,23 +569,44 @@ def load_events_from_file(events_file: str) -> List[Dict]:
     if not events:
         raise ValueError("No valid events found in file")
     
-    print(f"Loaded {len(events)} events")
+    # Report filtering
+    if filter_control_events and control_events:
+        print(f"\n{'='*60}")
+        print(f"FILTERED OUT CONTROL EVENTS")
+        print(f"{'='*60}")
+        print(f"Removed {len(control_events)} workflow control events:\n")
+        for ctrl_event in control_events:
+            ctrl_type = ctrl_event.get('control_type', 'UNKNOWN')
+            marker = ctrl_event.get('marker', '')
+            timestamp = ctrl_event.get('timestamp', '').split('T')[1][:8] if ctrl_event.get('timestamp') else 'N/A'
+            description = ctrl_event.get('description', '')
+            print(f"  [{timestamp}] {ctrl_type}")
+            if marker:
+                print(f"    Marker: {marker}")
+            if description:
+                print(f"    Description: {description}")
+            print()
+        print(f"{'='*60}\n")
+    
+    print(f"✓ Loaded {len(events)} events for workflow generation")
     return events
 
 
-def generate_workflow_from_events(events_file: str, output_file: str = None) -> Dict[str, Any]:
+def generate_workflow_from_events(events_file: str, output_file: str = None, 
+                                  filter_control_events: bool = True) -> Dict[str, Any]:
     """
     Generate orchestrator-compatible workflow from events file
     
     Args:
         events_file: Path to events.jsonl file
         output_file: Optional path to save workflow JSON
+        filter_control_events: If True, filter out workflow_control events (default: True)
         
     Returns:
         Orchestrator-compatible workflow dict
     """
-    # Load events
-    events = load_events_from_file(events_file)
+    # Load events (with control event filtering)
+    events = load_events_from_file(events_file, filter_control_events=filter_control_events)
     
     print("\n" + "="*80)
     print("UNIFIED WORKFLOW PLANNER V2 (IMPROVED)")
@@ -635,58 +676,50 @@ def generate_workflow_from_events(events_file: str, output_file: str = None) -> 
     return workflow
 
 
+def get_latest_recording_folder(base_dir="recordings"):
+    """Find the latest recording folder based on creation time"""
+    import os
+    from pathlib import Path
+    
+    if not os.path.exists(base_dir):
+        raise FileNotFoundError(f"Recordings directory '{base_dir}' not found")
+    
+    # Get all subdirectories in recordings folder
+    folders = [f for f in Path(base_dir).iterdir() if f.is_dir()]
+    
+    if not folders:
+        raise FileNotFoundError(f"No recording folders found in '{base_dir}'")
+    
+    # Sort by modification time (most recent first)
+    latest_folder = max(folders, key=lambda x: x.stat().st_mtime)
+    
+    return latest_folder
+
+
 def main():
     """CLI entry point"""
-    import sys
     
-    # Get file path from command line or use default
+    # Get file path from command line or use latest recording
     if len(sys.argv) > 1:
         events_file = sys.argv[1]
     else:
-        events_file = "recordings/20251231_192615/events.jsonl"
+        # Find latest recording folder
+        latest_folder = get_latest_recording_folder()
+        events_file = latest_folder / "events.jsonl"
+        print(f"Using latest recording: {latest_folder.name}")
+    
+    # Check if events file exists
+    if not Path(events_file).exists():
+        print(f"Error: events.jsonl not found in {Path(events_file).parent}")
+        return None
     
     # Generate output filename
-    output_file = events_file.replace('.jsonl', '_workflow_v2.json')
+    events_path = Path(events_file)
+    output_file = events_path.parent / f"{events_path.stem}_workflow_v2.json"
     
     try:
-        workflow = generate_workflow_from_events(events_file, output_file)
-        
-        print("\n" + "="*80)
-        print("USAGE WITH ORCHESTRATOR")
-        print("="*80)
-        print("\nPython example:")
-        print("```python")
-        print("from orchestrator import WorkflowOrchestrator")
-        print("import json")
-        print()
-        print(f"# Load generated workflow")
-        print(f"with open('{output_file.replace('.json', '_orchestrator.json')}', 'r') as f:")
-        print("    workflow = json.load(f)")
-        print()
-        print("# Execute with orchestrator")
-        print("orchestrator = WorkflowOrchestrator(")
-        print("    anthropic_api_key='your-api-key',")
-        print("    browser_headless=False,")
-        print("    desktop_headless=False,  # Set to True for headless mode")
-        print("    auto_cleanup=True")
-        print(")")
-        print()
-        print("result = orchestrator.execute_workflow(")
-        print("    workflow,")
-        print("    workflow_id='recorded_workflow',")
-        print("    stop_on_error=True,")
-        print("    save_result=True")
-        print(")")
-        print()
-        print("print(f'Status: {result.status}')")
-        print("print(f'Completed: {result.completed_steps}/{result.total_steps} steps')")
-        print()
-        print("# Access extracted data")
-        print("if 'restaurants' in result.context.get('vars', {}):")
-        print("    restaurants = result.context['vars']['restaurants']")
-        print("    print(f'Extracted {len(restaurants)} restaurants')")
-        print("```")
-        
+        workflow = generate_workflow_from_events(str(events_file), str(output_file))
+        print(f"Workflow generated successfully and saved to: {output_file}")        
         return workflow
         
     except Exception as e:

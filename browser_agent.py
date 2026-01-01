@@ -358,15 +358,15 @@ class PlaywrightBrowserAgent:
             if action == "verify_by_vision":
                 return self.verify_by_vision(args["expected_state"])
 
-            # Restaurants
-            if action == "extract_restaurants_from_results":
-                return self.extract_restaurants_from_results(
-                    max_restaurants=args.get("max_restaurants", 5),
+            # Generic content extraction (replaces restaurant-specific functions)
+            if action == "extract_page_content_from_results":
+                return self.extract_page_content_from_results(
+                    max_items=args.get("max_items", 5),
                     wait_between=args.get("wait_between", 1.0),
                 )
-            if action == "extract_restaurants_from_html":
-                return self.extract_restaurants_from_html(
-                    max_restaurants=args.get("max_restaurants", 5),
+            if action == "extract_page_content":
+                return self.extract_page_content(
+                    max_items=args.get("max_items", 5),
                 )
 
             return self._fail(ERROR_UNKNOWN, f"unknown browser action: {action}", {}, t0)
@@ -779,7 +779,7 @@ class PlaywrightBrowserAgent:
 
             logger.warning("Could not find first result with selectors, trying vision...")
             return self.click_by_vision(
-                "the first search result link that looks like a restaurant listing page, guide, or review site"
+                "the first search result link"
             )
 
         except PWTimeoutError as e:
@@ -958,6 +958,7 @@ class PlaywrightBrowserAgent:
         except Exception as e:
             logger.exception(f"Scroll error: {e}")
             return self._fail(ERROR_UNKNOWN, f"Scroll error: {e}", {}, t0)
+
     # -----------------------------
     # Vision-Based Actions
     # -----------------------------
@@ -1170,96 +1171,143 @@ Return JSON only:
         return loc.first, sel, count
 
     # -----------------------------
-    # Restaurant extraction (DOM first; Claude fallback)
+    # Generic Content Extraction (replaces restaurant-specific functions)
     # -----------------------------
-    def extract_restaurants_from_html(self, max_restaurants: int = 5) -> Dict[str, Any]:
+    def extract_page_content(self, max_items: int = 5) -> Dict[str, Any]:
+        """
+        Extract structured content from the current page using DOM parsing.
+        Tries to intelligently extract list items, articles, or main content.
+        Falls back to Claude vision if DOM extraction yields no results.
+        
+        Args:
+            max_items: Maximum number of items to extract
+            
+        Returns:
+            Dict with extraction results including 'extracted_content' and 'items'
+        """
         t0 = time.time()
         try:
-            logger.info(f"Extracting up to {max_restaurants} restaurants from DOM/HTML")
+            logger.info(f"Extracting up to {max_items} content items from page")
             self._maybe_close_popups()
             time.sleep(0.4)
 
-            url = self.page.url.lower()
+            # 1) Try DOM-first extraction
+            items = self._extract_content_items_dom(max_items=max_items)
 
-            # 1) DOM-first extraction (works well for Eater "maps" pages and many listicles)
-            restaurants = self._extract_restaurants_dom(max_restaurants=max_restaurants)
-
-            if restaurants:
-                logger.info(f"✓ DOM extracted {len(restaurants)} restaurants")
+            if items:
+                logger.info(f"✓ DOM extracted {len(items)} content items")
+                
+                # Format items as text for downstream use
+                text_content = self._format_items_as_text(items)
+                
                 return self._ok(
-                    f"Extracted {len(restaurants)} restaurants from DOM",
-                    {"restaurants": restaurants, "total_found": len(restaurants), "source": "dom", "page_url": self.page.url},
+                    f"Extracted {len(items)} content items from DOM",
+                    {
+                        "extracted_content": text_content,
+                        "items": items,
+                        "total_found": len(items),
+                        "source": "dom",
+                        "page_url": self.page.url
+                    },
                     t0,
                 )
 
-            # 2) Claude fallback (only if configured)
+            # 2) Try extracting main article/content text
+            main_text = self._extract_main_content_text()
+            if main_text and len(main_text) > 100:
+                logger.info(f"✓ Extracted main content text ({len(main_text)} chars)")
+                return self._ok(
+                    "Extracted main content text",
+                    {
+                        "extracted_content": main_text,
+                        "items": [],
+                        "total_found": 0,
+                        "source": "main_content",
+                        "page_url": self.page.url
+                    },
+                    t0,
+                )
+
+            # 3) Claude fallback (only if configured)
             if not self.claude:
-                return self._fail(ERROR_VISION, "Claude not configured and DOM extraction found none", {}, t0)
+                return self._fail(
+                    ERROR_EXTRACT,
+                    "Claude not configured and DOM extraction found no content",
+                    {},
+                    t0
+                )
 
-            html_content = self.page.content()
-            logger.info(f"HTML content length: {len(html_content)}")
-
-            max_html_length = 45_000
-            if len(html_content) > max_html_length:
-                html_content = html_content[:max_html_length] + "\n...[truncated]"
-
-            prompt = f"""Extract up to {max_restaurants} restaurant names from this HTML.
-
-Return JSON only:
-{{
-  "restaurants": [{{"name":"..."}}]
-}}"""
-
-            response = self.claude.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=1200,
-                messages=[{"role": "user", "content": prompt + "\n\nHTML:\n" + html_content}],
-            )
-
-            text = "".join([c.text for c in response.content if hasattr(c, "text")])
-            parsed = _extract_first_json(text)
-
-            if not isinstance(parsed, dict):
-                return self._fail(ERROR_EXTRACT, "Claude returned non-JSON (no dict found)", {"raw": text[:800]}, t0)
-
-            extracted = parsed.get("restaurants") or []
-            cleaned = []
-            for r in extracted:
-                if isinstance(r, dict) and r.get("name"):
-                    cleaned.append({"name": str(r["name"]).strip()})
-                elif isinstance(r, str) and r.strip():
-                    cleaned.append({"name": r.strip()})
-
-            cleaned = cleaned[:max_restaurants]
-
-            if not cleaned:
-                return self._fail(ERROR_EXTRACT, "Claude extraction returned zero restaurants", {"raw": text[:800]}, t0)
-
-            return self._ok(
-                f"Extracted {len(cleaned)} restaurants (Claude fallback)",
-                {"restaurants": cleaned, "total_found": len(cleaned), "source": "claude", "page_url": self.page.url},
-                t0,
-            )
+            logger.info("DOM extraction yielded no results, trying Claude vision...")
+            return self._extract_content_with_vision(max_items=max_items, t0=t0)
 
         except Exception as e:
-            logger.exception(f"HTML extraction error: {e}")
-            return self._fail(ERROR_EXTRACT, f"HTML extraction error: {e}", {}, t0)
+            logger.exception(f"Content extraction error: {e}")
+            return self._fail(ERROR_EXTRACT, f"Content extraction error: {e}", {}, t0)
 
-    def _extract_restaurants_dom(self, max_restaurants: int = 5) -> List[Dict[str, Any]]:
+    def extract_page_content_from_results(
+        self, 
+        max_items: int = 5, 
+        wait_between: float = 1.0
+    ) -> Dict[str, Any]:
         """
-        DOM-based extraction (no LLM). Targets listicles/maps pages:
-        - Eater maps pages often have repeating restaurant cards with headings.
+        Extract structured content from search results using Claude vision.
+        Uses vision to identify and extract visible content items.
+        
+        Args:
+            max_items: Maximum number of items to extract
+            wait_between: Delay before taking screenshot
+            
+        Returns:
+            Dict with extraction results
+        """
+        t0 = time.time()
+        if not self.claude:
+            return self._fail(ERROR_VISION, "Vision not available", {}, t0)
+
+        try:
+            logger.info(f"Extracting up to {max_items} content items from results (vision)")
+            self._maybe_close_popups()
+            time.sleep(wait_between)
+
+            return self._extract_content_with_vision(max_items=max_items, t0=t0)
+
+        except Exception as e:
+            logger.exception(f"Vision content extraction error: {e}")
+            return self._fail(ERROR_VISION, f"Vision content extraction error: {e}", {}, t0)
+
+    def _extract_content_items_dom(self, max_items: int = 5) -> List[Dict[str, Any]]:
+        """
+        DOM-based content extraction. Targets common patterns:
+        - List items with headings (articles, guides, listicles)
+        - Structured content blocks
+        - Recipe items, product listings, etc.
         """
         candidates: List[str] = []
 
+        # Selectors for common content patterns
         selectors = [
-            # Eater/Chorus-like map/list pages
+            # Articles and listicles
             "article h2",
+            "article h3",
             "main h2",
+            "main h3",
             "[data-testid] h2",
+            "[data-testid] h3",
+            ".content h2",
+            ".content h3",
+            # Specific patterns (Eater, food blogs, etc.)
             ".c-mapstack__card h2",
             ".c-mapstack__heading",
             ".c-entry-content h2",
+            ".c-entry-content h3",
+            # Generic list items
+            "li h2",
+            "li h3",
+            "li strong",
+            # Recipe titles
+            ".recipe-title",
+            ".recipe-name",
+            "[itemprop='name']",
         ]
 
         for sel in selectors:
@@ -1270,56 +1318,127 @@ Return JSON only:
                     txt = (loc.nth(i).inner_text() or "").strip()
                     if not txt:
                         continue
+                    
                     # Heuristics to skip generic headings
-                    bad = {"map", "related", "more", "where to eat", "best sushi", "updates", "sign up", "newsletter"}
+                    bad_keywords = {
+                        "map", "related", "more", "where to", "updates", 
+                        "sign up", "newsletter", "subscribe", "follow",
+                        "advertisement", "sponsored"
+                    }
                     low = txt.lower()
-                    if any(b in low for b in bad):
+                    if any(b in low for b in bad_keywords):
                         continue
-                    # Skip very long headings
-                    if len(txt) > 80:
+                    
+                    # Skip very long headings (likely not item titles)
+                    if len(txt) > 100:
                         continue
+                    
+                    # Skip very short headings (likely not meaningful)
+                    if len(txt) < 3:
+                        continue
+                    
                     candidates.append(txt)
             except Exception:
                 continue
 
         # Deduplicate while preserving order
         seen = set()
-        uniq = []
+        unique = []
         for c in candidates:
             if c.lower() in seen:
                 continue
             seen.add(c.lower())
-            uniq.append(c)
+            unique.append(c)
 
-        # Often listicles include numbers or trailing punctuation
+        # Clean up formatting (remove numbering, trailing punctuation)
         cleaned = []
-        for name in uniq:
+        for name in unique:
+            # Remove leading numbers (e.g., "1. Restaurant Name")
             name2 = re.sub(r"^\d+\.\s*", "", name).strip()
+            # Remove trailing pipes and content after them
             name2 = re.sub(r"\s+\|.*$", "", name2).strip()
-            if len(name2) >= 2:
+            # Remove extra whitespace
+            name2 = re.sub(r"\s+", " ", name2).strip()
+            
+            if len(name2) >= 3:
                 cleaned.append(name2)
 
-        cleaned = cleaned[:max_restaurants]
+        cleaned = cleaned[:max_items]
         return [{"name": n} for n in cleaned]
 
-    def extract_restaurants_from_results(self, max_restaurants: int = 5, wait_between: float = 1.0) -> Dict[str, Any]:
-        t0 = time.time()
-        if not self.claude:
-            return self._fail(ERROR_VISION, "Vision not available", {}, t0)
+    def _extract_main_content_text(self) -> str:
+        """
+        Extract main text content from the page.
+        Tries common content containers in order of preference.
+        """
+        content_selectors = [
+            "article",
+            "main",
+            "[role='main']",
+            ".main-content",
+            ".content",
+            ".post-content",
+            ".entry-content",
+            "#content",
+            "body"
+        ]
+        
+        for selector in content_selectors:
+            try:
+                loc = self.page.locator(selector)
+                if loc.count() > 0:
+                    text = loc.first.inner_text()
+                    if text and len(text.strip()) > 100:  # Meaningful content threshold
+                        return text.strip()
+            except Exception:
+                continue
+        
+        return ""
 
+    def _format_items_as_text(self, items: List[Dict[str, Any]]) -> str:
+        """
+        Format extracted items as readable text for downstream use.
+        """
+        if not items:
+            return ""
+        
+        lines = []
+        for i, item in enumerate(items, 1):
+            name = item.get("name", "")
+            if name:
+                lines.append(f"{i}. {name}")
+        
+        return "\n".join(lines)
+
+    def _extract_content_with_vision(
+        self, 
+        max_items: int = 5, 
+        t0: float = None
+    ) -> Dict[str, Any]:
+        """
+        Use Claude vision to extract content from the page.
+        This is a fallback when DOM extraction doesn't work.
+        """
+        if t0 is None:
+            t0 = time.time()
+        
         try:
-            logger.info(f"Extracting up to {max_restaurants} restaurants from search results (vision)")
-            self._maybe_close_popups()
-            time.sleep(wait_between)
-
             screenshot_b64 = self._take_screenshot_base64()
-            prompt = f"""Extract up to {max_restaurants} restaurants visible in this screenshot.
+            
+            prompt = f"""Extract up to {max_items} content items visible in this screenshot.
+Look for structured content like:
+- List items (restaurants, products, articles, etc.)
+- Article titles or headings
+- Key information blocks
 
 Return JSON only:
 {{
-  "restaurants":[{{"name":"...", "rating":null, "cuisine":null, "price_range":null, "address":null, "description":null}}],
-  "page_type":"unknown"
-}}"""
+  "items": [{{"name": "...", "description": null}}],
+  "page_type": "unknown"
+}}
+
+If you cannot identify structured items, extract the main text content instead.
+"""
 
             response = self.claude.messages.create(
                 model="claude-sonnet-4-20250514",
@@ -1327,7 +1446,14 @@ Return JSON only:
                 messages=[{
                     "role": "user",
                     "content": [
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": screenshot_b64}},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": screenshot_b64
+                            }
+                        },
                         {"type": "text", "text": prompt},
                     ],
                 }],
@@ -1335,21 +1461,42 @@ Return JSON only:
 
             text = "".join([c.text for c in response.content if hasattr(c, "text")])
             parsed = _extract_first_json(text) or {}
-            restaurants = parsed.get("restaurants", []) if isinstance(parsed, dict) else []
-            restaurants = restaurants[:max_restaurants]
+            
+            items = parsed.get("items", []) if isinstance(parsed, dict) else []
+            items = items[:max_items]
 
-            if not restaurants:
-                return self._fail(ERROR_EXTRACT, "Vision extraction returned zero restaurants", {"raw": text[:800]}, t0)
+            if not items:
+                return self._fail(
+                    ERROR_EXTRACT,
+                    "Vision extraction returned no content items",
+                    {"raw": text[:800]},
+                    t0
+                )
+
+            # Format as text
+            text_content = self._format_items_as_text(items)
 
             return self._ok(
-                f"Extracted {len(restaurants)} restaurants",
-                {"restaurants": restaurants, "total_found": len(restaurants), "page_type": parsed.get("page_type", "unknown")},
+                f"Extracted {len(items)} content items (vision)",
+                {
+                    "extracted_content": text_content,
+                    "items": items,
+                    "total_found": len(items),
+                    "page_type": parsed.get("page_type", "unknown"),
+                    "source": "vision",
+                    "page_url": self.page.url
+                },
                 t0,
             )
 
         except Exception as e:
-            logger.exception(f"Restaurant extraction error: {e}")
-            return self._fail(ERROR_VISION, f"Restaurant extraction error: {e}", {}, t0)
+            logger.exception(f"Vision content extraction error: {e}")
+            return self._fail(
+                ERROR_VISION,
+                f"Vision content extraction error: {e}",
+                {},
+                t0
+            )
 
     # -----------------------------
     # Helpers
@@ -1564,7 +1711,7 @@ if __name__ == "__main__":
         steps = [
             {"id": "step_1", "action": "search", "args": {"query": "best sushi restaurants in San Francisco"}, "retries": 2},
             {"id": "step_2", "action": "click_first_result", "args": {"result_type": "any"}, "retries": 3},
-            {"id": "step_3", "action": "extract_restaurants_from_html", "args": {"max_restaurants": 5}, "retries": 2},
+            {"id": "step_3", "action": "extract_page_content", "args": {"max_items": 5}, "retries": 2},
         ]
 
         ctx: Dict[str, Any] = {"vars": {}}

@@ -265,6 +265,9 @@ class ActivityRecorder:
             # Store page reference
             self.page = page
             
+            # Navigate to DuckDuckGo by default
+            await self.page.goto("https://duckduckgo.com", wait_until="domcontentloaded")
+            
             # Always log page navigation (important for DSL)
             def sync_log_page_load():
                 self.log_event("page_load", {
@@ -313,7 +316,7 @@ class ActivityRecorder:
                 page.on("response", log_response)
             
             print(f"Browser instrumentation started ({self.browser_type}" + 
-                  (f" via {self.browser_channel}" if self.browser_channel else "") + ")")
+                (f" via {self.browser_channel}" if self.browser_channel else "") + ")")
             return page
             
         except Exception as e:
@@ -439,35 +442,108 @@ class ActivityRecorder:
 
 
 async def main():
-    """Example usage"""
+    """Manual recording with unique start/stop markers"""
+    # Unique markers that can be filtered out
+    START_MARKER = "###WORKFLOW_RECORDING_START###"
+    STOP_MARKER = "###WORKFLOW_RECORDING_STOP###"
+    
     recorder = ActivityRecorder()
+    
+    print("\n" + "="*60)
+    print("ACTIVITY RECORDER - MANUAL MODE")
+    print("="*60)
+    print("\nTo START recording, type:")
+    print(f"  {START_MARKER}")
+    print("\nTo STOP recording, type:")
+    print(f"  {STOP_MARKER}")
+    print("\nThese markers will be logged and can be filtered out later.")
+    print("="*60 + "\n")
+    
+    # Wait for start command
+    while True:
+        user_input = input("Waiting for start command: ").strip()
+        if user_input == START_MARKER:
+            print("\n✓ Start command received!\n")
+            break
+        else:
+            print(f"Invalid command. Please type: {START_MARKER}")
     
     try:
         # Start recording and get browser page
         page = await recorder.start_recording(enable_browser=True)
         
-        if page:
-            # Example browser automation (optional)
-            await page.goto("https://www.google.com")
-            await page.fill('textarea[name="q"]', 'Python activity recording')
-            await page.keyboard.press('Enter')
-            await page.wait_for_load_state('networkidle')
-            
-            # Let it record for a bit
-            print("Recording for 30 seconds... (interact with your computer)")
-        else:
-            print("Browser not available, recording screen and input only for 30 seconds...")
+        # Log the start marker
+        recorder.log_event("workflow_control", {
+            "control_type": "START",
+            "marker": START_MARKER,
+            "description": "Recording started by user command"
+        })
         
-        await asyncio.sleep(30)
+        if page:
+            print("✓ Browser page available for automation")
+            print("  You can now interact with the browser and your system")
+        else:
+            print("✓ Recording screen and input only")
+        
+        print(f"\nWhen done, type: {STOP_MARKER}\n")
+        
+        # Wait for stop command in a non-blocking way
+        stop_event = asyncio.Event()
+        
+        def check_stop_command():
+            while not stop_event.is_set():
+                try:
+                    user_input = input().strip()
+                    if user_input == STOP_MARKER:
+                        print("\n✓ Stop command received!\n")
+                        stop_event.set()
+                        break
+                    else:
+                        print(f"Invalid command. To stop, type: {STOP_MARKER}")
+                except EOFError:
+                    break
+        
+        # Run input checker in thread
+        input_thread = threading.Thread(target=check_stop_command, daemon=True)
+        input_thread.start()
+        
+        # Wait for stop event
+        while not stop_event.is_set():
+            await asyncio.sleep(0.1)
+        
+        # Log the stop marker
+        recorder.log_event("workflow_control", {
+            "control_type": "STOP",
+            "marker": STOP_MARKER,
+            "description": "Recording stopped by user command"
+        })
         
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        print("\n\n⚠ Interrupted by Ctrl+C")
+        recorder.log_event("workflow_control", {
+            "control_type": "INTERRUPT",
+            "description": "Recording interrupted by user (Ctrl+C)"
+        })
     except Exception as e:
-        print(f"\nError during recording: {e}")
+        print(f"\n❌ Error during recording: {e}")
         import traceback
         traceback.print_exc()
+        recorder.log_event("workflow_control", {
+            "control_type": "ERROR",
+            "description": f"Recording stopped due to error: {str(e)}"
+        })
     finally:
         await recorder.stop_recording()
+        
+        # Print filtering instructions
+        print("\n" + "="*60)
+        print("WORKFLOW FILTERING")
+        print("="*60)
+        print("\nTo filter out control commands from events.jsonl:")
+        print(f'  grep -v "workflow_control" {recorder.events_path}')
+        print("\nOr programmatically filter events where:")
+        print(f'  event["event_type"] != "workflow_control"')
+        print("="*60 + "\n")
 
 
 if __name__ == "__main__":
