@@ -323,7 +323,11 @@ class PlaywrightBrowserAgent:
             if action == "search":
                 return self.search(args["query"], engine=args.get("engine", self.search_engine))
             if action == "click_first_result":
-                return self.click_first_result(result_type=args.get("result_type", "any"))
+                return self.click_first_quality_result(
+                    result_type=args.get("result_type", "any"),
+                    max_attempts=args.get("max_attempts", 5),
+                    skip_domains=args.get("skip_domains"),
+                )
             if action == "click":
                 locator = args["locator"]
                 strategy = args.get("strategy", "first_match")
@@ -462,6 +466,271 @@ class PlaywrightBrowserAgent:
         except Exception as e:
             logger.exception(f"Search exception: {e}")
             return self._fail(ERROR_UNKNOWN, f"search exception: {e}", {}, t0)
+
+    def _detect_bot_check(self) -> bool:
+        """
+        Detect if we've hit a bot check page (Cloudflare, reCAPTCHA, etc.)
+        Returns True if bot check detected
+        """
+        bot_indicators = [
+            # Cloudflare
+            "checking your browser",
+            "cloudflare",
+            "cf-browser-verification",
+            "Just a moment",
+            "Enable JavaScript and cookies",
+            # reCAPTCHA
+            "recaptcha",
+            "g-recaptcha",
+            "I'm not a robot",
+            # Generic bot checks
+            "verify you are human",
+            "prove you're not a robot",
+            "security check",
+            "automated access",
+            "suspicious activity",
+            # Specific sites
+            "access denied",
+            "blocked",
+            "too many requests",
+        ]
+        
+        try:
+            # Check page title
+            title = self.page.title().lower()
+            for indicator in bot_indicators:
+                if indicator.lower() in title:
+                    logger.warning(f"Bot check detected in title: '{title}'")
+                    return True
+            
+            # Check page content
+            body_text = self.page.locator("body").inner_text().lower()
+            for indicator in bot_indicators:
+                if indicator.lower() in body_text:
+                    logger.warning(f"Bot check detected in body: indicator='{indicator}'")
+                    return True
+            
+            # Check for common bot check elements
+            bot_selectors = [
+                "#challenge-form",  # Cloudflare
+                ".g-recaptcha",  # reCAPTCHA
+                "[data-callback='onRecaptchaSuccess']",
+                "iframe[src*='recaptcha']",
+                "#cf-wrapper",
+                ".cf-browser-verification",
+            ]
+            
+            for selector in bot_selectors:
+                if self.page.locator(selector).count() > 0:
+                    logger.warning(f"Bot check element found: {selector}")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error detecting bot check: {e}")
+            return False
+
+    def _is_sponsored_or_low_quality_result(self, url: str, title: str = "") -> bool:
+        """
+        Detect if a search result is sponsored or from a low-quality aggregator site
+        """
+        url_lower = url.lower()
+        title_lower = title.lower()
+        
+        # Sponsored indicators in URL
+        sponsored_params = [
+            "ad=",
+            "sponsored",
+            "gclid=",
+            "msclkid=",
+            "fbclid=",
+            "utm_source=",
+        ]
+        
+        for param in sponsored_params:
+            if param in url_lower:
+                logger.info(f"Skipping sponsored result (param: {param}): {url[:80]}")
+                return True
+        
+        # Low-quality aggregator sites
+        low_quality_domains = [
+            "yelp.com",
+            "groupon.com",
+            "tripadvisor.com",
+            "yellowpages.com",
+            "manta.com",
+            "superpages.com",
+            "mapquest.com",
+            "foursquare.com",
+            # Add more as needed
+        ]
+        
+        for domain in low_quality_domains:
+            if domain in url_lower:
+                logger.info(f"Skipping aggregator site: {domain} ({url[:80]})")
+                return True
+        
+        # Sponsored indicators in title
+        sponsored_keywords = ["ad", "sponsored", "promoted"]
+        for keyword in sponsored_keywords:
+            if keyword in title_lower and len(title_lower.split()) < 10:
+                logger.info(f"Skipping result with sponsored keyword in title: {title}")
+                return True
+        
+        return False
+
+    def click_first_quality_result(
+        self, 
+        result_type: str = "any", 
+        max_attempts: int = 5,
+        skip_domains: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Click the first quality (non-sponsored, non-bot-checked) search result.
+        Will try multiple results if encountering bot checks.
+        
+        Args:
+            result_type: Type of result to look for
+            max_attempts: Maximum number of results to try before giving up
+            skip_domains: Additional domains to skip
+        """
+        t0 = time.time()
+        skip_domains = skip_domains or ["yelp.com", "groupon.com"]
+        
+        try:
+            logger.info(f"Looking for first quality search result (max_attempts={max_attempts})")
+            self._maybe_close_popups()
+            time.sleep(0.5)
+
+            selectors = [
+                'article[data-testid="result"] h2 a',
+                'div[data-testid="result"] h2 a',
+                'article h2 a',
+                'a[data-testid="result-title-a"]',
+                ".result__a",
+                "h2 > a",
+                "article a[href]",
+            ]
+
+            # Collect all potential results
+            all_results = []
+            for selector in selectors:
+                try:
+                    loc = self.page.locator(selector)
+                    count = loc.count()
+                    for i in range(min(count, max_attempts * 2)):  # Get more than we need
+                        try:
+                            elem = loc.nth(i)
+                            href = elem.get_attribute("href") or ""
+                            title = (elem.text_content() or "").strip()
+                            
+                            if not href or not title:
+                                continue
+                                
+                            all_results.append({
+                                "element": elem,
+                                "href": href,
+                                "title": title,
+                                "index": i,
+                                "selector": selector
+                            })
+                        except Exception:
+                            continue
+                except Exception as e:
+                    logger.debug(f"Selector {selector} failed: {e}")
+                    continue
+            
+            if not all_results:
+                logger.warning("No results found with selectors, trying vision...")
+                return self.click_by_vision(
+                    "the first organic (non-sponsored) search result link"
+                )
+            
+            logger.info(f"Found {len(all_results)} total results, filtering...")
+            
+            # Try results one by one
+            attempts = 0
+            for result in all_results:
+                if attempts >= max_attempts:
+                    break
+                
+                href = result["href"]
+                title = result["title"]
+                
+                # Skip sponsored/low-quality results
+                if self._is_sponsored_or_low_quality_result(href, title):
+                    continue
+                
+                # Skip explicitly blocked domains
+                if any(domain in href.lower() for domain in skip_domains):
+                    logger.info(f"Skipping blocked domain: {href[:80]}")
+                    continue
+                
+                attempts += 1
+                logger.info(f"Attempt {attempts}/{max_attempts}: Trying result '{title[:60]}'")
+                logger.info(f"URL: {href[:120]}")
+                
+                try:
+                    before_url = self.page.url
+                    result["element"].click(timeout=5000)
+                    
+                    # Wait for navigation
+                    self._wait_for_url_change_or_timeout(before_url, self.default_timeout_ms)
+                    time.sleep(1.5)
+                    
+                    # Check if we hit a bot check
+                    if self._detect_bot_check():
+                        logger.warning(f"Bot check detected on {self.page.url}")
+                        logger.info("Going back to search results...")
+                        self.page.go_back(wait_until="domcontentloaded")
+                        time.sleep(1.0)
+                        continue
+                    
+                    # Success!
+                    self._maybe_close_popups()
+                    logger.info(f"✓ Successfully navigated to quality result: {self.page.url}")
+                    
+                    return self._ok(
+                        "Clicked first quality search result",
+                        {
+                            "previous_url": before_url,
+                            "result_url": self.page.url,
+                            "result_link": href,
+                            "result_title": title,
+                            "attempts": attempts,
+                        },
+                        t0,
+                    )
+                    
+                except PWTimeoutError:
+                    logger.warning(f"Timeout clicking result {attempts}, trying next...")
+                    try:
+                        self.page.go_back(wait_until="domcontentloaded")
+                        time.sleep(0.5)
+                    except Exception:
+                        pass
+                    continue
+                except Exception as e:
+                    logger.warning(f"Error clicking result {attempts}: {e}")
+                    try:
+                        self.page.go_back(wait_until="domcontentloaded")
+                        time.sleep(0.5)
+                    except Exception:
+                        pass
+                    continue
+            
+            # If we got here, all attempts failed
+            return self._fail(
+                ERROR_CLICK,
+                f"Failed to find quality result after {attempts} attempts (all results were sponsored/bot-checked)",
+                {"attempts": attempts, "total_results": len(all_results)},
+                t0,
+            )
+
+        except Exception as e:
+            logger.exception(f"Click quality result error: {e}")
+            return self._fail(ERROR_CLICK, f"click quality result error: {e}", {}, t0)
 
     def click_first_result(self, result_type: str = "any") -> Dict[str, Any]:
         t0 = time.time()

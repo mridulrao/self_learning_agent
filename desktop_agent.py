@@ -73,6 +73,7 @@ ERROR_TYPE = "type_error"
 ERROR_HOTKEY = "hotkey_error"
 ERROR_ELEMENT_NOT_FOUND = "element_not_found"
 ERROR_VERIFICATION = "verification_failed"
+ERROR_FILE_VALIDATION = "file_validation_failed"
 ERROR_UNKNOWN = "unknown_error"
 
 
@@ -210,6 +211,12 @@ class MacDesktopAgent:
                 return self.type_text(args.get("text", ""))
             if action == "verify_visible":
                 return self.verify_visible(args["element_description"])
+            if action == "validate_file":
+                return self.validate_file(
+                    args["file_path"],
+                    expected_content=args.get("expected_content"),
+                    min_size=args.get("min_size", 0),
+                )
             if action == "hotkey":
                 return self.hotkey(args.get("keys", []))
             if action == "sleep":
@@ -336,7 +343,7 @@ end tell
             logger.exception(f"Exception during launch: {e}")
             return self._fail(ERROR_FOCUS, f"Launch error: {e}", {"app_name": app_name}, t0)
 
-    def click_element(self, element_description: str, offset_x: int = 0, offset_y: int = 0) -> Dict[str, Any]:
+    def click_element(self, element_description: str, offset_x: int = 0, offset_y: int = 0, prefer_position: Optional[str] = None) -> Dict[str, Any]:
         t0 = time.time()
         logger.info(f"Looking for element: '{element_description}'")
 
@@ -346,25 +353,38 @@ end tell
         try:
             screenshot_b64 = self._take_screenshot(suffix=f"click_{element_description.replace(' ', '_')[:30]}")
 
+            # Build position preference instruction
+            position_instruction = ""
+            if prefer_position:
+                if prefer_position.lower() in ["bottom", "lower"]:
+                    position_instruction = "\n\nIMPORTANT: If multiple matches exist, choose the one with the HIGHEST y-coordinate (bottommost element)."
+                elif prefer_position.lower() in ["top", "upper"]:
+                    position_instruction = "\n\nIMPORTANT: If multiple matches exist, choose the one with the LOWEST y-coordinate (topmost element)."
+                elif prefer_position.lower() in ["left", "leftmost"]:
+                    position_instruction = "\n\nIMPORTANT: If multiple matches exist, choose the one with the LOWEST x-coordinate (leftmost element)."
+                elif prefer_position.lower() in ["right", "rightmost"]:
+                    position_instruction = "\n\nIMPORTANT: If multiple matches exist, choose the one with the HIGHEST x-coordinate (rightmost element)."
+
             prompt = f"""Find this UI element in the screenshot:
 
-Element: {element_description}
+    Element: {element_description}{position_instruction}
 
-Return JSON only:
-{{
-  "found": true/false,
-  "x": <center_x>,
-  "y": <center_y>,
-  "left": <left>,
-  "top": <top>,
-  "right": <right>,
-  "bottom": <bottom>,
-  "confidence": 0.0-1.0
-}}"""
+    Return JSON only:
+    {{
+    "found": true/false,
+    "x": <center_x>,
+    "y": <center_y>,
+    "left": <left>,
+    "top": <top>,
+    "right": <right>,
+    "bottom": <bottom>,
+    "confidence": 0.0-1.0,
+    "reasoning": "<brief explanation of which element was chosen and why>"
+    }}"""
 
             response = self.claude.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=450,
+                max_tokens=500,  # Increased for reasoning field
                 messages=[{
                     "role": "user",
                     "content": [
@@ -396,7 +416,7 @@ Return JSON only:
 
             self._show_click_location(click_x, click_y, duration=1.5)
 
-            logger.info(f"Clicking at ({click_x}, {click_y})")
+            logger.info(f"Clicking at ({click_x}, {click_y}) - Reasoning: {result.get('reasoning', 'N/A')}")
             pyautogui.click(click_x, click_y)
             time.sleep(self.post_click_sleep_s)
 
@@ -412,6 +432,7 @@ Return JSON only:
                         "bottom": result.get("bottom"),
                     },
                     "confidence": result.get("confidence"),
+                    "reasoning": result.get("reasoning"),
                 },
                 t0,
             )
@@ -464,6 +485,107 @@ Return JSON only:
         except Exception as e:
             logger.exception(f"Exception during verification: {e}")
             return self._fail(ERROR_VERIFICATION, f"Verification error: {e}", {"element": element_description}, t0)
+
+    def validate_file(self, file_path: str, expected_content: Optional[str] = None, min_size: int = 0) -> Dict[str, Any]:
+        """
+        Validate that a file exists and optionally check its content.
+        
+        Args:
+            file_path: Path to the file to validate
+            expected_content: Optional substring that should be present in the file
+            min_size: Minimum file size in bytes (default: 0)
+        """
+        t0 = time.time()
+        logger.info(f"Validating file: {file_path}")
+        
+        try:
+            # Expand user path if needed
+            file_path_obj = Path(file_path).expanduser()
+            
+            # Check if file exists
+            if not file_path_obj.exists():
+                return self._fail(
+                    ERROR_FILE_VALIDATION,
+                    f"File does not exist: {file_path}",
+                    {"file_path": str(file_path_obj)},
+                    t0
+                )
+            
+            # Check if it's a file (not a directory)
+            if not file_path_obj.is_file():
+                return self._fail(
+                    ERROR_FILE_VALIDATION,
+                    f"Path exists but is not a file: {file_path}",
+                    {"file_path": str(file_path_obj)},
+                    t0
+                )
+            
+            # Get file size
+            file_size = file_path_obj.stat().st_size
+            logger.info(f"File size: {file_size} bytes")
+            
+            # Check minimum size
+            if file_size < min_size:
+                return self._fail(
+                    ERROR_FILE_VALIDATION,
+                    f"File too small: {file_size} bytes < {min_size} bytes",
+                    {"file_path": str(file_path_obj), "size": file_size, "min_size": min_size},
+                    t0
+                )
+            
+            # Read file content if needed
+            file_content = None
+            if expected_content is not None or file_size < 1024 * 1024:  # Read if <1MB or content check needed
+                try:
+                    # Try UTF-8 first
+                    with open(file_path_obj, 'r', encoding='utf-8') as f:
+                        file_content = f.read()
+                    logger.info(f"File content length: {len(file_content)} characters (UTF-8)")
+                except UnicodeDecodeError:
+                    # Try latin-1 for RTF files
+                    try:
+                        with open(file_path_obj, 'r', encoding='latin-1') as f:
+                            file_content = f.read()
+                        logger.info(f"File content length: {len(file_content)} characters (latin-1)")
+                    except Exception:
+                        # Binary file or other encoding issue
+                        logger.warning(f"Could not read file as text, treating as binary")
+                        file_content = None
+            
+            # Check expected content
+            if expected_content and file_content is not None:
+                if expected_content not in file_content:
+                    return self._fail(
+                        ERROR_FILE_VALIDATION,
+                        f"Expected content not found in file",
+                        {
+                            "file_path": str(file_path_obj),
+                            "expected": expected_content[:100],
+                            "preview": file_content[:500] if file_content else None
+                        },
+                        t0
+                    )
+                logger.info(f"Found expected content in file")
+            
+            return self._ok(
+                f"File validated: {file_path}",
+                {
+                    "file_path": str(file_path_obj),
+                    "size": file_size,
+                    "content_preview": file_content[:200] if file_content else None,
+                    "content_length": len(file_content) if file_content else None
+                },
+                t0
+            )
+            
+        except Exception as e:
+            logger.exception(f"Exception during file validation: {e}")
+            return self._fail(
+                ERROR_FILE_VALIDATION,
+                f"File validation error: {e}",
+                {"file_path": file_path},
+                t0
+            )
 
     def type_text(self, text: str) -> Dict[str, Any]:
         t0 = time.time()
@@ -578,7 +700,7 @@ Return JSON only:
 
 
 # -----------------------------
-# Example Usage (debug individually)
+# Example Usage with File Validation
 # -----------------------------
 if __name__ == "__main__":
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -594,14 +716,54 @@ if __name__ == "__main__":
         type_delay_s=_env_float("DESKTOP_TYPE_DELAY_S", 0.0),
     )
 
+    # Example workflow: Create a text file and validate it
+    test_content = "Hello from Desktop Agent!\n"
+    
+    # TextEdit saves to iCloud Documents by default with .rtf extension
+    username = os.path.expanduser("~").split('/')[-1]
+    save_path = f"/Users/{username}/Library/Mobile Documents/com~apple~TextEdit/Documents/test_file.rtf"
+    
     steps = [
         {"id": "step_1", "action": "launch_fullscreen", "args": {"app_name": "TextEdit"}, "retries": 2},
         {"id": "step_2", "action": "click_element", "args": {"element_description": "New Document button"}, "retries": 3},
-        {"id": "step_3", "action": "type_text", "args": {"text": "Hello from Desktop Agent!\n"}, "retries": 1},
+        {"id": "step_3", "action": "type_text", "args": {"text": test_content}, "retries": 1},
+        {"id": "step_4", "action": "hotkey", "args": {"keys": ["cmd", "s"]}, "retries": 2},  # Save dialog
+        {"id": "step_5", "action": "sleep", "args": {"duration": 0.5}},  # Wait for dialog
+        {"id": "step_6", "action": "type_text", "args": {"text": "test_file"}, "retries": 1},  # Filename
+        {"id": "step_7", "action": "hotkey", "args": {"keys": ["enter"]}, "retries": 2},  # Confirm save
+        {"id": "step_8", "action": "sleep", "args": {"duration": 1.0}},  # Wait for file to save
+        {
+            "id": "step_9",
+            "action": "validate_file",
+            "args": {
+                "file_path": save_path,
+                "expected_content": "Hello from Desktop Agent",
+                "min_size": 10  # At least 10 bytes
+            },
+            "retries": 3  # Retry validation if it fails
+        },
     ]
 
+    ctx = {}
+    all_success = True
+    
     for s in steps:
-        r = agent.run_step(s, {})
+        r = agent.run_step(s, ctx)
         print(json.dumps(r, indent=2))
+        
         if not r.get("ok"):
+            logger.error(f"Step {s['id']} failed: {r.get('message')}")
+            
+            # If validation failed, retry the entire file creation workflow
+            if r.get("action") == "validate_file" and r.get("error_type") == ERROR_FILE_VALIDATION:
+                logger.warning("File validation failed - retrying entire workflow...")
+                # You could implement logic here to retry from step_1 or step_3
+                # For now, we'll just break and report the failure
+                
+            all_success = False
             break
+    
+    if all_success:
+        logger.info("✅ All steps completed successfully!")
+    else:
+        logger.error("❌ Workflow failed")

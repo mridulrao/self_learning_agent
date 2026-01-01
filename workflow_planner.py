@@ -1,5 +1,5 @@
 """
-Unified Workflow Planner - Generates orchestrator-compatible workflows from user activity
+Unified Workflow Planner v2 - Generates improved orchestrator-compatible workflows
 """
 import json
 from typing import List, Dict, Any, Optional
@@ -135,13 +135,18 @@ class UnifiedWorkflowPlanner:
         
         # Track state
         current_window = None
-        search_performed = None
+        last_search_query = None
+        final_search_query = None  # The query we actually want to use
         text_buffer = []
         in_browser = False
         navigated_to_site = False
         last_url = None
         search_result_clicked = False
         browser_session_ended = False
+        desktop_app_launched = False
+        
+        # Collect all search queries to find the most relevant one
+        all_searches = []
         
         # Debug: Count agent types
         browser_events = sum(1 for item in self.analyzer.timeline if item['agent'] == 'browser')
@@ -151,28 +156,36 @@ class UnifiedWorkflowPlanner:
         print(f"  Browser events: {browser_events}")
         print(f"  Desktop events: {desktop_events}")
         
-        # Show first few browser navigation events
-        print(f"\nFirst 5 browser navigation events:")
-        count = 0
+        # First pass: collect all searches and find the most relevant one
+        print(f"\nDetecting searches...")
         for item in self.analyzer.timeline:
-            if item['agent'] == 'browser' and item['event'].get('event_type') == 'navigation':
-                if count < 5:
-                    event = item['event']
-                    url = event.get('url', '')[:60]
-                    print(f"  {count+1}. navigation: {url}...")
-                    count += 1
+            event = item['event']
+            if item['agent'] == 'browser' and event.get('event_type') == 'navigation':
+                url = event.get('url', '')
+                if 'google.com/search' in url and 'q=' in url:
+                    query = self.analyzer.get_search_query(url)
+                    if query and query not in all_searches:
+                        all_searches.append(query)
+                        print(f"  Found search: '{query}'")
         
-        # Show first desktop events
-        print(f"\nFirst 3 desktop events:")
-        count = 0
-        for item in self.analyzer.timeline:
-            if item['agent'] == 'desktop' and count < 3:
-                event = item['event']
-                print(f"  {count+1}. {event.get('event_type')}: window='{item['window_title']}'")
-                count += 1
+        # Pick the last search as the main one (usually most relevant)
+        # Skip searches about "Python activity recording" or other meta searches
+        skip_keywords = ['python activity', 'recording', 'monitor', 'tracker']
+        for search in reversed(all_searches):
+            search_lower = search.lower()
+            if not any(keyword in search_lower for keyword in skip_keywords):
+                final_search_query = search
+                break
+        
+        if not final_search_query and all_searches:
+            final_search_query = all_searches[-1]
+        
+        if final_search_query:
+            print(f"\nSelected primary search query: '{final_search_query}'")
         
         print("\nProcessing events...\n")
         
+        # Second pass: generate workflow steps
         for item in self.analyzer.timeline:
             event = item['event']
             agent = item['agent']
@@ -197,16 +210,19 @@ class UnifiedWorkflowPlanner:
                         continue
                     last_url = url
                     
-                    # Detect search
+                    # Detect search - but only add the final/primary search
                     if 'google.com/search' in url and 'q=' in url:
                         query = self.analyzer.get_search_query(url)
-                        if query and query != search_performed:
-                            search_performed = query
-                            print(f"Detected search: '{query}'")
+                        
+                        # Only add search step if this is our selected primary query
+                        # and we haven't already added a search step
+                        if query == final_search_query and not last_search_query:
+                            last_search_query = query
+                            print(f"Adding search step for: '{query}'")
                             
                             self._add_step(
                                 action="search",
-                                args={"query": query},
+                                args={"query": query, "engine": "duckduckgo"},
                                 agent="browser",
                                 description=f"Search for: {query}",
                                 retries=2,
@@ -215,20 +231,26 @@ class UnifiedWorkflowPlanner:
                             )
                     
                     # Detect navigation to actual site (not Google)
-                    elif search_performed and 'google.com' not in url and not navigated_to_site:
+                    elif last_search_query and 'google.com' not in url and not navigated_to_site:
                         domain = self.analyzer.get_domain(url)
                         
-                        if domain and 'captcha' not in domain.lower() and 'googletagmanager' not in domain.lower():
+                        # Skip technical/tracking domains
+                        skip_domains = ['captcha', 'googletagmanager', 'doubleclick', 'analytics']
+                        if domain and not any(skip in domain.lower() for skip in skip_domains):
                             navigated_to_site = True
                             print(f"Detected navigation to: {domain}")
                             
-                            # Add click step if we haven't already
+                            # Add improved click step with bot detection handling
                             if not search_result_clicked:
                                 self._add_step(
                                     action="click_first_result",
-                                    args={"result_type": "any"},
+                                    args={
+                                        "result_type": "any",
+                                        "max_attempts": 5,  # Try up to 5 results
+                                        "skip_domains": ["yelp.com", "groupon.com", "tripadvisor.com"]
+                                    },
                                     agent="browser",
-                                    description="Click on the first search result",
+                                    description="Click first quality search result (skip sponsored/bot-checked sites)",
                                     retries=3,
                                     delay_after=3.0,
                                     timestamp=timestamp
@@ -269,73 +291,93 @@ class UnifiedWorkflowPlanner:
                     current_window = window_title
                     in_browser = False
                     
-                    # Launch desktop app (extract app name from window title or use app_name)
+                    # Launch desktop app
                     app_name = event.get('app_name', window_title)
                     
-                    self._add_step(
-                        action="launch_fullscreen",
-                        args={"app_name": app_name},
-                        agent="desktop",
-                        description=f"Launch {app_name}",
-                        retries=2,
-                        delay_after=1.0,
-                        timestamp=timestamp
-                    )
-                    
-                    # For text editors, create new document
-                    if any(editor in app_name for editor in ['TextEdit', 'Notes', 'Notepad']):
+                    # Only launch app once
+                    if not desktop_app_launched:
                         self._add_step(
-                            action="click_element",
-                            args={"element_description": "New Document button or text area"},
+                            action="launch_fullscreen",
+                            args={"app_name": app_name},
                             agent="desktop",
-                            description="Create new document or click text area",
-                            retries=3,
-                            delay_after=0.5,
+                            description=f"Launch {app_name}",
+                            retries=2,
+                            delay_after=1.5,
                             timestamp=timestamp
                         )
+                        desktop_app_launched = True
+                        
+                        # For text editors, create new document with improved click
+                        if any(editor in app_name for editor in ['TextEdit', 'Notes', 'Notepad']):
+                            self._add_step(
+                                action="click_element",
+                                args={
+                                    "element_description": "New Document button",
+                                    "prefer_position": "bottom"  # IMPROVED: Always pick bottom button
+                                },
+                                agent="desktop",
+                                description="Create new document (click bottom New Document button)",
+                                retries=3,
+                                delay_after=0.8,
+                                timestamp=timestamp
+                            )
                 
-                # Text input
+                # Text input - collect for typing step
                 elif event_type == 'key_press':
                     key = event.get('key', '')
                     
-                    # Skip if this is part of a save command
-                    if key in ['Key.cmd', 'Key.ctrl']:
+                    # Skip modifier keys and save commands
+                    if key in ['Key.cmd', 'Key.ctrl', 'Key.shift', 'Key.alt']:
                         continue
                         
                     # Regular text character
-                    if len(key) == 1 and key.isalnum():
+                    if len(key) == 1:
                         text_buffer.append(key)
                     elif key == 'Key.space':
                         text_buffer.append(' ')
+                    elif key == 'Key.enter':
+                        text_buffer.append('\n')
                     elif key == 'Key.backspace' and text_buffer:
                         text_buffer.pop()
         
-        # Add typing step if we have text
-        if text_buffer:
-            text = ''.join(text_buffer).strip()
-            if text:
-                print(f"Adding typing step: '{text}'")
+        # Add typing step with context-aware text
+        if text_buffer or browser_session_ended:
+            # If we extracted restaurants, use formatted output
+            if browser_session_ended:
+                print(f"Adding typing step with restaurant extraction context")
                 self._add_step(
                     action="type_text",
                     args={
-                        "text_from_ctx": "restaurants_text",
-                        "fallback_text": text
+                        "text": "{{restaurants_formatted}}"  # Will be replaced by orchestrator
                     },
                     agent="desktop",
-                    description=f"Type extracted restaurant information",
+                    description="Type extracted restaurant information",
                     retries=1,
                     delay_after=0.5
                 )
+            # Otherwise use the collected text
+            elif text_buffer:
+                text = ''.join(text_buffer).strip()
+                if text:
+                    print(f"Adding typing step with collected text: '{text[:50]}...'")
+                    self._add_step(
+                        action="type_text",
+                        args={"text": text},
+                        agent="desktop",
+                        description=f"Type text",
+                        retries=1,
+                        delay_after=0.5
+                    )
         
         # Detect save command (CMD+S or CTRL+S)
         save_detected = self._detect_save_command()
         
         if save_detected:
             print("Save command detected")
-            self._add_save_workflow(text_buffer)
+            self._add_save_workflow(final_search_query or "notes")
         
         # Build final workflow
-        workflow = self._build_workflow_output(search_performed)
+        workflow = self._build_workflow_output(final_search_query)
         return workflow
     
     def _detect_save_command(self) -> bool:
@@ -351,23 +393,31 @@ class UnifiedWorkflowPlanner:
                     modifier_pressed = True
                 elif modifier_pressed and key == 's':
                     return True
-                elif key not in ['Key.cmd', 'Key.ctrl']:
+                elif key not in ['Key.cmd', 'Key.ctrl', 'Key.shift', 'Key.alt']:
                     modifier_pressed = False
         
         return False
     
-    def _add_save_workflow(self, text_buffer: List[str]):
+    def _add_save_workflow(self, context: str):
         """Add save workflow steps"""
-        text = ''.join(text_buffer).strip() if text_buffer else "notes"
-        filename = self._infer_filename(text)
+        filename = self._infer_filename(context)
         
         self._add_step(
             action="hotkey",
-            args={"keys": ["CMD", "S"]},
+            args={"keys": ["cmd", "s"]},  # lowercase for compatibility
             agent="desktop",
-            description="Save the document (CMD+S)",
+            description="Save the document (Cmd+S)",
+            retries=2,
+            delay_after=0.8
+        )
+        
+        self._add_step(
+            action="sleep",
+            args={"duration": 0.5},
+            agent="desktop",
+            description="Wait for save dialog",
             retries=1,
-            delay_after=0.5
+            delay_after=0.0
         )
         
         self._add_step(
@@ -376,39 +426,65 @@ class UnifiedWorkflowPlanner:
             agent="desktop",
             description=f"Enter filename: {filename}",
             retries=1,
-            delay_after=0.3
+            delay_after=0.5
         )
         
         self._add_step(
             action="hotkey",
-            args={"keys": ["ENTER"]},
+            args={"keys": ["enter"]},  # lowercase for compatibility
             agent="desktop",
             description="Confirm save",
-            retries=1,
+            retries=2,
+            delay_after=0.8
+        )
+        
+        # Add file validation step
+        # Construct expected file path
+        import os
+        username = os.path.expanduser("~").split('/')[-1]
+        file_path = f"/Users/{username}/Library/Mobile Documents/com~apple~TextEdit/Documents/{filename}"
+        
+        self._add_step(
+            action="validate_file",
+            args={
+                "file_path": file_path,
+                "min_size": 10,
+                "expected_content": None  # Optional: could check for keywords
+            },
+            agent="desktop",
+            description=f"Verify file was saved successfully",
+            retries=3,
             delay_after=0.5
         )
     
-    def _infer_filename(self, text: str) -> str:
-        """Infer filename from text content"""
+    def _infer_filename(self, context: str) -> str:
+        """Infer filename from context"""
         import re
         
-        # Get first few words
-        words = text.split()[:3]
+        # Clean context text
+        context = context.lower().strip()
+        
+        # Extract keywords
+        words = context.split()[:3]  # First 3 words
         if words:
-            filename = '_'.join(words).lower()
+            # Clean and join
+            filename = '_'.join(words)
             filename = re.sub(r'[^\w\s-]', '', filename)
             filename = re.sub(r'[-\s]+', '_', filename)
-            return f"{filename}.txt"
+            
+            # Add appropriate extension
+            return f"{filename}_info.rtf"  # TextEdit default is RTF
         
-        return "restaurants_info.txt"
+        return "notes.rtf"
     
     def _build_workflow_output(self, search_query: Optional[str]) -> Dict[str, Any]:
         """Build the final workflow output (orchestrator-compatible format)"""
         
         # Determine user intent
-        intent = "Perform automated task"
         if search_query:
             intent = f"Search for '{search_query}', extract information, and save to document"
+        else:
+            intent = "Perform automated task"
         
         # Return orchestrator-compatible format
         workflow = {
@@ -431,7 +507,14 @@ class UnifiedWorkflowPlanner:
             "desktop_steps": desktop_count,
             "total_events_analyzed": len(self.analyzer.events),
             "sequential": True,
-            "mixed_agents": True
+            "mixed_agents": True,
+            "improvements": [
+                "Uses click_first_quality_result with bot detection",
+                "Uses prefer_position for desktop clicks",
+                "Filters out meta-searches (e.g., 'python activity recording')",
+                "Adds file validation after save",
+                "Better context-aware text typing"
+            ]
         }
 
 
@@ -485,7 +568,7 @@ def generate_workflow_from_events(events_file: str, output_file: str = None) -> 
     events = load_events_from_file(events_file)
     
     print("\n" + "="*80)
-    print("UNIFIED WORKFLOW PLANNER")
+    print("UNIFIED WORKFLOW PLANNER V2 (IMPROVED)")
     print("="*80)
     
     # Create planner and generate workflow
@@ -493,7 +576,7 @@ def generate_workflow_from_events(events_file: str, output_file: str = None) -> 
     workflow = planner.analyze_and_plan()
     
     # Get metadata
-    metadata = planner.get_metadata()
+    metadata = planner.get_metadata(workflow.get('description', '').split("'")[1] if "'" in workflow.get('description', '') else None)
     
     # Display results
     print("\n" + "="*80)
@@ -504,6 +587,9 @@ def generate_workflow_from_events(events_file: str, output_file: str = None) -> 
     print(f"  - Browser Steps: {metadata['browser_steps']}")
     print(f"  - Desktop Steps: {metadata['desktop_steps']}")
     print(f"Events Analyzed: {metadata['total_events_analyzed']}")
+    print(f"\nImprovements Applied:")
+    for imp in metadata['improvements']:
+        print(f"  ✓ {imp}")
     
     print("\n" + "="*80)
     print("GENERATED WORKFLOW (Orchestrator-Compatible)")
@@ -516,7 +602,12 @@ def generate_workflow_from_events(events_file: str, output_file: str = None) -> 
         print(f"\n{i}. {agent_tag} {step['action'].upper()}")
         if step.get('description'):
             print(f"   → {step['description']}")
-        print(f"   Args: {json.dumps(step['args'], indent=8)}")
+        
+        # Pretty print args
+        args_str = json.dumps(step['args'], indent=2)
+        for line in args_str.split('\n'):
+            print(f"   {line}")
+        
         print(f"   Retries: {step['retries']}, Delay: {step['delay_after']}s")
     
     print("\n" + "="*80)
@@ -555,7 +646,7 @@ def main():
         events_file = "recordings/20251231_192615/events.jsonl"
     
     # Generate output filename
-    output_file = events_file.replace('.jsonl', '_workflow.json')
+    output_file = events_file.replace('.jsonl', '_workflow_v2.json')
     
     try:
         workflow = generate_workflow_from_events(events_file, output_file)
@@ -576,6 +667,7 @@ def main():
         print("orchestrator = WorkflowOrchestrator(")
         print("    anthropic_api_key='your-api-key',")
         print("    browser_headless=False,")
+        print("    desktop_headless=False,  # Set to True for headless mode")
         print("    auto_cleanup=True")
         print(")")
         print()
@@ -588,6 +680,11 @@ def main():
         print()
         print("print(f'Status: {result.status}')")
         print("print(f'Completed: {result.completed_steps}/{result.total_steps} steps')")
+        print()
+        print("# Access extracted data")
+        print("if 'restaurants' in result.context.get('vars', {}):")
+        print("    restaurants = result.context['vars']['restaurants']")
+        print("    print(f'Extracted {len(restaurants)} restaurants')")
         print("```")
         
         return workflow
