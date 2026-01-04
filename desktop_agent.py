@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+"""
+Mac Desktop Agent
+"""
 import time
 import subprocess
 import base64

@@ -10,7 +10,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from desktop_agent import MacDesktopAgent
-from browser_agent import PlaywrightBrowserAgent
+from browser_agent import GoogleFormsBrowserAgent  # ✅ updated: your Google Forms agent
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,6 +24,16 @@ def _env_bool(name: str, default: bool) -> bool:
     if v is None:
         return default
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except Exception:
+        return default
 
 
 def _env_float(name: str, default: float) -> float:
@@ -122,36 +132,77 @@ class WorkflowResult:
 
 
 # -----------------------------
-# Helper Function to Format Restaurant Text
+# Helper: format form submission details for TextEdit
 # -----------------------------
-def format_restaurants_for_textedit(restaurants: List[Dict[str, Any]], title: str = "🍽️ Restaurants") -> str:
-    if not restaurants:
-        return "No restaurants found.\n"
+def format_form_submission_for_textedit(
+    *,
+    form_id: str = "",
+    submitted: Optional[bool] = None,
+    filled_details: Optional[Dict[str, Any]] = None,
+    fill_results: Optional[Dict[str, Any]] = None,
+    before_url: str = "",
+    after_url: str = "",
+    missing_required_questions: Optional[List[str]] = None,
+    title: str = "✅ Google Form Submission",
+) -> str:
+    filled_details = filled_details or {}
+    fill_results = fill_results or {}
+    missing_required_questions = missing_required_questions or []
 
-    lines = []
+    lines: List[str] = []
     lines.append(title)
-    lines.append("=" * 60)
+    lines.append("=" * 72)
+    lines.append("")
+    if form_id:
+        lines.append(f"Form ID: {form_id}")
+    if submitted is not None:
+        lines.append(f"Submitted: {submitted}")
+    if before_url:
+        lines.append(f"Before URL: {before_url}")
+    if after_url:
+        lines.append(f"After URL:  {after_url}")
     lines.append("")
 
-    for i, restaurant in enumerate(restaurants, 1):
-        name = restaurant.get("name") or "Unknown Restaurant"
-        lines.append(f"{i}. {name}")
-        lines.append("-" * 40)
-
-        for k, label in [
-            ("rating", "⭐ Rating"),
-            ("cuisine", "🍜 Cuisine"),
-            ("price_range", "💰 Price"),
-            ("address", "📍 Address"),
-            ("phone", "📞 Phone"),
-            ("website", "🌐 Website"),
-            ("description", "📝"),
-        ]:
-            v = restaurant.get(k)
-            if v:
-                lines.append(f"   {label}: {v}" if label != "📝" else f"   📝 {v}")
-
+    if missing_required_questions:
+        lines.append("⚠️ Missing required questions detected:")
+        for q in missing_required_questions:
+            lines.append(f"  - {q}")
         lines.append("")
+
+    lines.append("🧾 Filled Details")
+    lines.append("-" * 72)
+    if not filled_details:
+        lines.append("(No filled_details returned)")
+    else:
+        for k, v in filled_details.items():
+            vv = "" if v is None else str(v)
+            lines.append(f"- {k}: {vv}")
+    lines.append("")
+
+    lines.append("🔎 Fill Results (status per key)")
+    lines.append("-" * 72)
+    if not fill_results:
+        lines.append("(No fill_results returned)")
+    else:
+        for k, r in fill_results.items():
+            if not isinstance(r, dict):
+                lines.append(f"- {k}: {r}")
+                continue
+            status = r.get("status", "")
+            ftype = r.get("type", "")
+            verified = r.get("verified", None)
+            reason = r.get("reason", "")
+            observed = r.get("observed", "")
+            bits = [b for b in [status, ftype] if b]
+            suffix = f" ({', '.join(bits)})" if bits else ""
+            lines.append(f"- {k}{suffix}")
+            if verified is not None:
+                lines.append(f"    verified: {verified}")
+            if reason:
+                lines.append(f"    reason: {reason}")
+            if observed:
+                lines.append(f"    observed: {observed}")
+    lines.append("")
 
     return "\n".join(lines)
 
@@ -161,48 +212,67 @@ def format_restaurants_for_textedit(restaurants: List[Dict[str, Any]], title: st
 # -----------------------------
 class WorkflowOrchestrator:
     """
-    Orchestrates multi-agent workflows combining browser and desktop automation.
+    Orchestrates multi-agent workflows combining:
+      - browser: GoogleFormsBrowserAgent (your actions: goto, fill_google_form, submit_form, etc.)
+      - desktop: MacDesktopAgent
 
-    Adds:
-    - Dynamic arg resolution from ctx (e.g. text_from_ctx)
-    - Auto-derivation of restaurants_text after extraction
+    Key update:
+      - When submit_form returns {form_id, filled_details, fill_results}, we derive a formatted
+        ctx var `form_submission_text` and pass it to desktop agent via text_from_ctx.
     """
 
     def __init__(
         self,
         anthropic_api_key: str,
+        # Browser (GoogleFormsBrowserAgent) settings
         browser_headless: bool = False,
         browser_use_chrome_channel: bool = True,
         browser_stealth_mode: bool = True,
-        browser_search_engine: str = "duckduckgo",
         browser_artifacts_dir: str = "artifacts",
+        browser_default_timeout_ms: int = 15_000,
+        browser_implicit_wait_ms: int = 6_000,
+        browser_fill_passes: int = 2,
+        browser_lazy_mount_scroll: bool = True,
+        browser_scroll_between_questions_px: int = 150,
+        browser_use_vision: bool = True,
+        # Desktop
         desktop_save_screenshots: bool = True,
         desktop_debug_clicks: bool = True,
         desktop_apply_menubar_offset: bool = True,
         desktop_debug_dir: str = "/tmp/desktop_agent_debug",
+        # Orchestrator
         results_dir: str = "workflow_results",
         auto_cleanup: bool = True,
         default_step_delay: float = 0.5,
     ):
         self.anthropic_api_key = anthropic_api_key
+
+        # Browser config
         self.browser_headless = browser_headless
         self.browser_use_chrome_channel = browser_use_chrome_channel
         self.browser_stealth_mode = browser_stealth_mode
-        self.browser_search_engine = browser_search_engine
         self.browser_artifacts_dir = browser_artifacts_dir
+        self.browser_default_timeout_ms = browser_default_timeout_ms
+        self.browser_implicit_wait_ms = browser_implicit_wait_ms
+        self.browser_fill_passes = browser_fill_passes
+        self.browser_lazy_mount_scroll = browser_lazy_mount_scroll
+        self.browser_scroll_between_questions_px = browser_scroll_between_questions_px
+        self.browser_use_vision = browser_use_vision
 
+        # Desktop config
         self.desktop_save_screenshots = desktop_save_screenshots
         self.desktop_debug_clicks = desktop_debug_clicks
         self.desktop_apply_menubar_offset = desktop_apply_menubar_offset
         self.desktop_debug_dir = desktop_debug_dir
 
+        # Orchestrator config
         self.results_dir = Path(results_dir)
         self.auto_cleanup = auto_cleanup
         self.default_step_delay = default_step_delay
 
         self.results_dir.mkdir(exist_ok=True)
 
-        self._browser_agent: Optional[PlaywrightBrowserAgent] = None
+        self._browser_agent: Optional[GoogleFormsBrowserAgent] = None
         self._desktop_agent: Optional[MacDesktopAgent] = None
 
         logger.info("WorkflowOrchestrator initialized")
@@ -211,17 +281,22 @@ class WorkflowOrchestrator:
     # -----------------------------
     # Agent Management
     # -----------------------------
-    def _get_browser_agent(self) -> PlaywrightBrowserAgent:
+    def _get_browser_agent(self) -> GoogleFormsBrowserAgent:
         if self._browser_agent is None:
-            logger.info("Initializing browser agent...")
-            self._browser_agent = PlaywrightBrowserAgent(
+            logger.info("Initializing GoogleFormsBrowserAgent...")
+            self._browser_agent = GoogleFormsBrowserAgent(
                 headless=self.browser_headless,
+                viewport=(1280, 800),
                 artifacts_dir=self.browser_artifacts_dir,
-                anthropic_api_key=self.anthropic_api_key,
-                use_vision=True,
-                search_engine=self.browser_search_engine,
+                default_timeout_ms=self.browser_default_timeout_ms,
+                implicit_wait_ms=self.browser_implicit_wait_ms,
                 stealth_mode=self.browser_stealth_mode,
                 use_chrome_channel=self.browser_use_chrome_channel,
+                fill_passes=self.browser_fill_passes,
+                scroll_between_questions_px=self.browser_scroll_between_questions_px,
+                lazy_mount_scroll=self.browser_lazy_mount_scroll,
+                anthropic_api_key=self.anthropic_api_key,
+                use_vision=self.browser_use_vision,
             )
             self._browser_agent.launch()
             logger.info("✓ Browser agent initialized")
@@ -245,6 +320,7 @@ class WorkflowOrchestrator:
 
         if self._browser_agent:
             try:
+                # Note: submit_form() may already close the browser; this is safe.
                 self._browser_agent.close()
                 logger.info("✓ Browser agent closed")
             except Exception as e:
@@ -262,13 +338,14 @@ class WorkflowOrchestrator:
     def _resolve_step_args(self, step: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         """
         Supports:
-        - args.text_from_ctx: name of ctx["vars"] key to use as desktop type_text input
-        - args.fallback_text: used if ctx var missing/empty
+          - args.text_from_ctx: name of ctx["vars"] key to use as desktop type_text input
+          - args.fallback_text: used if ctx var missing/empty
+          - args.json_from_ctx: similar, but serializes dict/list to pretty JSON string
         """
         args = dict(step.get("args") or {})
         vars_ = context.get("vars", {})
 
-        # Resolve text_from_ctx → text
+        # Resolve text_from_ctx -> text
         if "text_from_ctx" in args and "text" not in args:
             key = args.get("text_from_ctx")
             fallback = args.get("fallback_text", "")
@@ -277,6 +354,19 @@ class WorkflowOrchestrator:
                 args["text"] = fallback
             else:
                 args["text"] = val
+
+        # Resolve json_from_ctx -> text (pretty JSON)
+        if "json_from_ctx" in args and "text" not in args:
+            key = args.get("json_from_ctx")
+            fallback = args.get("fallback_text", "")
+            val = vars_.get(key)
+            if val is None:
+                args["text"] = fallback
+            else:
+                try:
+                    args["text"] = json.dumps(val, indent=2, ensure_ascii=False)
+                except Exception:
+                    args["text"] = str(val)
 
         return args
 
@@ -348,23 +438,31 @@ class WorkflowOrchestrator:
                 )
                 step_results.append(step_result)
 
-                # Update context
+                # Update context vars with extracted payload
                 if step_result.extracted:
                     context["vars"].update(step_result.extracted)
-
-                    # If restaurants present, derive restaurants_text automatically
-                    if "restaurants" in step_result.extracted:
-                        restaurants = step_result.extracted["restaurants"] or []
-                        context["vars"]["restaurants"] = restaurants
-                        context["vars"]["total_restaurants"] = len(restaurants)
-
-                        # Derive formatted text used by desktop steps
-                        context["vars"]["restaurants_text"] = format_restaurants_for_textedit(
-                            restaurants,
-                            title="🍣 Best Sushi Restaurants in San Francisco",
-                        )
-
                     logger.info(f"Updated context with {len(step_result.extracted)} variables")
+
+                    # ✅ NEW: If submit_form returned form details, derive text for desktop agent
+                    # Your submit_form extracted_payload includes:
+                    #   submitted, form_id, filled_details, fill_results, before_url, after_url, missing_required_questions, ...
+                    if ("filled_details" in step_result.extracted) or ("form_id" in step_result.extracted):
+                        try:
+                            form_text = format_form_submission_for_textedit(
+                                form_id=str(step_result.extracted.get("form_id") or ""),
+                                submitted=step_result.extracted.get("submitted"),
+                                filled_details=step_result.extracted.get("filled_details") or {},
+                                fill_results=step_result.extracted.get("fill_results") or {},
+                                before_url=str(step_result.extracted.get("before_url") or ""),
+                                after_url=str(step_result.extracted.get("after_url") or ""),
+                                missing_required_questions=step_result.extracted.get("missing_required_questions") or [],
+                                title="✅ Google Form Submission (Captured by Orchestrator)",
+                            )
+                            context["vars"]["form_submission_text"] = form_text
+                            context["vars"]["form_id"] = str(step_result.extracted.get("form_id") or "")
+                            logger.info("Derived ctx.vars['form_submission_text'] for desktop agent")
+                        except Exception as e:
+                            logger.warning(f"Failed to derive form_submission_text: {e}")
 
                 if step_result.ok:
                     completed_steps += 1
@@ -436,7 +534,14 @@ class WorkflowOrchestrator:
             agent = self._get_desktop_agent()
             return agent.run_step(step, context)
 
-        return {"ok": False, "error_type": "unknown_agent", "message": f"Unknown agent type: {agent_type}", "evidence": {}, "extracted": {}, "timing_ms": 0}
+        return {
+            "ok": False,
+            "error_type": "unknown_agent",
+            "message": f"Unknown agent type: {agent_type}",
+            "evidence": {},
+            "extracted": {},
+            "timing_ms": 0,
+        }
 
     # -----------------------------
     # Result Persistence
@@ -477,7 +582,15 @@ class WorkflowBuilder:
         self.steps: List[Dict[str, Any]] = []
         self._step_counter = 0
 
-    def add_browser_step(self, action: str, args: Dict[str, Any], description: str = "", retries: int = 2, delay_after: float = 0.5) -> "WorkflowBuilder":
+    def add_browser_step(
+        self,
+        action: str,
+        args: Dict[str, Any],
+        description: str = "",
+        retries: int = 2,
+        delay_after: float = 0.5,
+        assertions: Optional[List[Dict[str, Any]]] = None,
+    ) -> "WorkflowBuilder":
         self._step_counter += 1
         self.steps.append(
             {
@@ -485,6 +598,7 @@ class WorkflowBuilder:
                 "action": action,
                 "args": args,
                 "retries": retries,
+                "assertions": assertions or [],
                 "description": description or f"{action} with {args}",
                 "agent": "browser",
                 "delay_after": delay_after,
@@ -493,7 +607,14 @@ class WorkflowBuilder:
         )
         return self
 
-    def add_desktop_step(self, action: str, args: Dict[str, Any], description: str = "", retries: int = 2, delay_after: float = 0.5) -> "WorkflowBuilder":
+    def add_desktop_step(
+        self,
+        action: str,
+        args: Dict[str, Any],
+        description: str = "",
+        retries: int = 2,
+        delay_after: float = 0.5,
+    ) -> "WorkflowBuilder":
         self._step_counter += 1
         self.steps.append(
             {
@@ -514,7 +635,7 @@ class WorkflowBuilder:
 
 
 # -----------------------------
-# Example Usage (end-to-end demo)
+# Example Usage (Google Form -> TextEdit)
 # -----------------------------
 if __name__ == "__main__":
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -526,8 +647,13 @@ if __name__ == "__main__":
         browser_headless=_env_bool("BROWSER_HEADLESS", False),
         browser_use_chrome_channel=_env_bool("BROWSER_USE_CHROME_CHANNEL", True),
         browser_stealth_mode=_env_bool("BROWSER_STEALTH_MODE", True),
-        browser_search_engine=os.getenv("BROWSER_SEARCH_ENGINE", "duckduckgo"),
         browser_artifacts_dir=os.getenv("BROWSER_ARTIFACTS_DIR", "artifacts"),
+        browser_default_timeout_ms=_env_int("BROWSER_DEFAULT_TIMEOUT_MS", 15_000),
+        browser_implicit_wait_ms=_env_int("BROWSER_IMPLICIT_WAIT_MS", 6_000),
+        browser_fill_passes=_env_int("FORM_FILL_PASSES", 2),
+        browser_lazy_mount_scroll=_env_bool("FORM_LAZY_MOUNT_SCROLL", True),
+        browser_scroll_between_questions_px=_env_int("FORM_SCROLL_BETWEEN_QUESTIONS_PX", 150),
+        browser_use_vision=_env_bool("BROWSER_USE_VISION", True),
         desktop_save_screenshots=_env_bool("DESKTOP_SAVE_SCREENSHOTS", True),
         desktop_debug_clicks=_env_bool("DESKTOP_DEBUG_CLICKS", True),
         desktop_apply_menubar_offset=_env_bool("DESKTOP_APPLY_MENUBAR_OFFSET", True),
@@ -537,30 +663,46 @@ if __name__ == "__main__":
         default_step_delay=_env_float("ORCH_DEFAULT_STEP_DELAY", 0.5),
     )
 
+    # ✅ This workflow uses ONLY your GoogleFormsBrowserAgent actions.
     workflow = (
-        WorkflowBuilder("Search for best pizza restaurants, extract info, and save to TextEdit")
+        WorkflowBuilder("Fill Google Form, submit, then save returned details to TextEdit")
         .add_browser_step(
-            action="search",
-            args={"query": "best pizza restaurants in San Francisco"},
-            description="Search on DuckDuckGo",
+            action="goto",
+            args={"url": "https://forms.gle/j9FWqyBRidYCCoCRA"},
+            description="Open the Google Form",
             retries=2,
-            delay_after=2.0,
+            delay_after=1.5,
         )
         .add_browser_step(
-            action="click_first_result",
-            args={"result_type": "any"},
-            description="Click first search result",
-            retries=3,
-            delay_after=3.0,
+            action="fill_google_form",
+            args={
+                "passes": 2,
+                "form_data": {
+                    "Full Name": "John Doe",
+                    "Already filled": "No",
+                    "Location": "LA",
+                    "preferred method of communication": "Email",
+                    "enjoy Mondays": "7",
+                    "most productive": "Morning",
+                    "I certify all the details filled are somewhat correct. Please enter your full name": "John Doe",
+                },
+            },
+            description="Fill the form fields (multi-pass with required validation)",
+            retries=0,
+            delay_after=0.8,
         )
         .add_browser_step(
-            action="extract_restaurants_from_html",
-            args={"max_restaurants": 5},
-            description="Extract restaurant information (DOM-first, Claude fallback)",
+            action="submit_form",
+            args={
+                "require_no_missing_required": True,
+                "return_filled_details": True,
+                "return_form_id": True,
+            },
+            description="Submit the form and capture {form_id, filled_details, fill_results}",
             retries=2,
-            delay_after=1.0,
+            delay_after=0.8,
         )
-        # Desktop phase
+        # Desktop phase: save the returned details
         .add_desktop_step(
             action="launch_fullscreen",
             args={"app_name": "TextEdit"},
@@ -577,10 +719,14 @@ if __name__ == "__main__":
         )
         .add_desktop_step(
             action="type_text",
-            args={"text_from_ctx": "restaurants_text", "fallback_text": "No restaurants found.\n"},
-            description="Type extracted restaurants into document",
+            args={
+                # ✅ the orchestrator derives this after submit_form
+                "text_from_ctx": "form_submission_text",
+                "fallback_text": "No form submission text found.\n",
+            },
+            description="Type the captured form submission details into TextEdit",
             retries=1,
-            delay_after=0.5,
+            delay_after=0.4,
         )
         .add_desktop_step(
             action="hotkey",
@@ -591,7 +737,7 @@ if __name__ == "__main__":
         )
         .add_desktop_step(
             action="type_text",
-            args={"text": "sf_pizza_restaurants.txt"},
+            args={"text": "google_form_submission.txt"},
             description="Enter filename",
             retries=1,
             delay_after=0.3,
@@ -608,11 +754,11 @@ if __name__ == "__main__":
 
     result = orchestrator.execute_workflow(
         workflow,
-        workflow_id="sushi_search_save_demo",
+        workflow_id="google_form_submit_save_demo",
         stop_on_error=True,
         save_result=True,
     )
 
     print("\nStatus:", result.status)
-    restaurants = result.context.get("vars", {}).get("restaurants", [])
-    print("Restaurants extracted:", len(restaurants))
+    print("Form ID:", result.context.get("vars", {}).get("form_id", ""))
+    print("Submitted:", result.context.get("vars", {}).get("submitted", None))
