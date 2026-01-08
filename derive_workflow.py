@@ -436,7 +436,11 @@ def build_browser_ui_steps(
     return steps
 
 # -----------------------------
-# Browser navigation steps
+# Browser navigation steps (semantic)
+"""
+Between time A and time B, the user caused the browser to transition from page X to page Y, 
+and here’s the strongest evidence of why that happened.
+"""
 # -----------------------------
 @dataclass
 class BrowserNavStep:
@@ -444,15 +448,15 @@ class BrowserNavStep:
     t_anchor_ms: int
     t_start_ms: int
     t_end_ms: int
-    anchor_type: str
-    anchor: Dict[str, Any] = field(default_factory=dict)
-    final_url: str = ""
-    final_url_canon: str = ""
-    main_frame_chain: List[str] = field(default_factory=list)
-    kept_nav_events: List[str] = field(default_factory=list)
-    summary: str = ""
-    verify_hint: Dict[str, Any] = field(default_factory=dict)
-    caused_by: Dict[str, Any] = field(default_factory=dict)
+    anchor_type: str # browser_submit, browser_click, browser_select, os_enter, nav_burst - intent signals
+    anchor: Dict[str, Any] = field(default_factory=dict) # text / button label / DOM / app/window title / 
+    final_url: str = "" # final_url
+    final_url_canon: str = "" # canonicalized final_url
+    main_frame_chain: List[str] = field(default_factory=list) # chain of main frames
+    kept_nav_events: List[str] = field(default_factory=list) # kept navigation events
+    summary: str = "" # for the LLM
+    verify_hint: Dict[str, Any] = field(default_factory=dict) # URL change, DOM exist, networkidle
+    caused_by: Dict[str, Any] = field(default_factory=dict) # which primitive will cause this navigation # not the final primitive
 
 def is_main_frame_nav(ev: Dict[str, Any]) -> bool:
     if ev.get("event_type") != "web_navigation":
@@ -596,6 +600,7 @@ def build_browser_nav_steps(
 
     def t(ev): return safe_int(ev.get("time_ms"))
 
+    # one “user intent” can produce multiple nav events (redirects, SPA, etc.) and that whole cluster becomes one burst.
     for ev in main_nav:
         if not cur:
             cur = [ev]
@@ -613,6 +618,7 @@ def build_browser_nav_steps(
     def nav_url(ev: Dict[str, Any]) -> str:
         return str(ev.get("url") or ev.get("main_url") or "")
 
+    # all anchors are sorted by time and have a rank
     def anchor_rank(a_type: str, payload: Dict[str, Any]) -> int:
         if a_type.startswith("ui_step:"):
             kind = str(payload.get("kind") or "")
@@ -634,14 +640,17 @@ def build_browser_nav_steps(
             return 140 if reason == "enter" else 20
         return 0
 
+    # given a burst of navigation events, pick the best anchor
     def pick_best_anchor(burst_start: int) -> Optional[Tuple[int, str, Dict[str, Any]]]:
         lookback_start = burst_start - max(1500, pre_ms)
+        # for each burst, it looks backward in time for anchor
         candidates = [a for a in anchors_sorted if lookback_start <= a[0] <= burst_start]
         if not candidates:
             return None
         best = None
         for a in candidates:
             at, a_type, payload = a
+            # rank anchors by type and time
             r = anchor_rank(a_type, payload)
             score = (r, -abs(burst_start - at))
             if best is None or score > best[0]:
@@ -681,6 +690,8 @@ def build_browser_nav_steps(
         else:
             t_anchor, a_type, a_payload = (t_start, "nav_event", {"event_id": ev_id(burst[0])})
 
+        # caused_by = {"anchor_type": a_type, "step_id": ..., "kind": ...}
+        # “replay exactly that UI step” (click/type/select/submit)
         caused_by: Dict[str, Any] = {"anchor_type": a_type}
         if a_type.startswith("ui_step:") and a_payload.get("step_id"):
             caused_by.update({"step_id": a_payload.get("step_id"), "kind": a_payload.get("kind")})
