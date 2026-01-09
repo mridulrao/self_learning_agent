@@ -393,7 +393,7 @@ class WorkflowOrchestrator:
 # -----------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--workflow", default="recordings/20260107_190820/workflow_steps.v1.json")
+    ap.add_argument("--workflow", default="recordings/20260108_125755/workflow_steps.v1.json")
     ap.add_argument("--results-dir", default=_env_str("ORCH_RESULTS_DIR", "workflow_results"))
     ap.add_argument("--no-cleanup", action="store_true")
     ap.add_argument("--no-stop-on-error", action="store_true")

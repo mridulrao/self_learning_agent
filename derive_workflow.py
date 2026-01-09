@@ -1546,7 +1546,7 @@ def write_outputs(session_dir: Path, steps: List[Dict[str, Any]]) -> None:
 # -----------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--session-dir", default="recordings/20260107_190820")
+    ap.add_argument("--session-dir", default="recordings/20260108_125755")
     ap.add_argument("--events", default="events.jsonl")
 
     ap.add_argument("--web-pre-ms", type=int, default=200)
@@ -1561,7 +1561,7 @@ def main():
     ap.add_argument("--desktop-merge-within-ms", type=int, default=900)
     ap.add_argument("--desktop-text-merge-within-ms", type=int, default=1800)
 
-    ap.add_argument("--desktop-ocr-url", default="https://vqlzy77m77329p-8000.proxy.runpod.net")
+    ap.add_argument("--desktop-ocr-url", default="https://h0vo8i5tfec2in-8000.proxy.runpod.net/")
     ap.add_argument("--desktop-ocr-timeout", type=int, default=120)
     ap.add_argument("--desktop-ocr-min-conf", type=float, default=0.55)
     ap.add_argument("--desktop-ocr-near-radius", type=int, default=60)
