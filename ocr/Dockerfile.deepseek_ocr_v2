@@ -1,0 +1,69 @@
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HF_HOME=/models \
+    VLLM_DOWNLOAD_DIR=/models \
+    PIP_NO_CACHE_DIR=1 \
+    MODEL_ID=deepseek-ai/DeepSeek-OCR \
+    VLLM_GPU_MEMORY_UTILIZATION=0.8 \
+    MAX_MODEL_LEN=8192 \
+    MAX_TOKENS=8192 \
+    TENSOR_PARALLEL_SIZE=1 \
+    # screenshot preprocessing defaults
+    MAX_SIDE=1600 \
+    CONTRAST=1.15 \
+    SHARPNESS=1.2 \
+    # EasyOCR defaults
+    EASYOCR_LANGS=en \
+    EASYOCR_GPU=true \
+    FUZZY_MATCH_THRESHOLD=85
+
+# ---- System deps ----
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 python3.10-venv python3.10-dev python3-pip \
+    git \
+    build-essential \
+    clang \
+    # OpenCV / EasyOCR runtime deps
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
+    # healthcheck
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.10 -m pip install --upgrade pip
+
+WORKDIR /app
+RUN mkdir -p /models
+
+# ---- Copy app code ----
+COPY gateway_v2.py /app/gateway.py
+COPY download_model.py /app/download_model.py
+
+# ---- Python deps ----
+RUN python3.10 -m pip install \
+        "transformers>=4.57.1" \
+        hf_transfer \
+        fastapi \
+        "uvicorn[standard]" \
+        orjson \
+        pillow \
+        python-multipart \
+        huggingface_hub \
+        # new: OCR boxes + fuzzy matching
+        easyocr \
+        opencv-python-headless \
+        rapidfuzz \
+        numpy
+
+# vLLM (nightly)
+RUN python3.10 -m pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=45s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8000/healthz || exit 1
+
+# ---- Entrypoint: download model then run gateway ----
+CMD ["bash", "-lc", "python3.10 download_model.py && uvicorn gateway:app --host 0.0.0.0 --port 8000 --workers 1 --timeout-keep-alive 30"]
