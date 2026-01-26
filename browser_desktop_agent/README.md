@@ -1,4 +1,6 @@
  # Browser + Desktop Agent (Record → Extract → Execute)
+
+ Design Choice: https://drive.google.com/file/d/1NHTc66iUBkGqOenlF0Nk9OnjzLn82kbS/view?usp=sharing
  
  This module supports a simple workflow lifecycle:
  
