@@ -1,0 +1,11 @@
+[project]
+name = "computer-use"
+version = "0.1.0"
+description = "Deterministic macOS computer-use workflow with screenshot grounding and LocateAnything."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "openai",
+    "Pillow",
+    "requests",
+]
