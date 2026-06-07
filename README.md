@@ -6,14 +6,14 @@ Deterministic macOS computer-use workflow with screenshot grounding, GUI-only mo
 
 This project automates a small end-to-end desktop task on macOS:
 
-1. Open Safari.
+1. Locate and click Safari in the macOS Dock.
 2. Take a screenshot of the desktop.
 3. Use a LocateAnything model to find the Safari search/address bar.
 4. Move the mouse and click that GUI target.
 5. Search for a query.
 6. Open the first relevant result.
 7. Extract stock-related text from the loaded page with a vision model.
-8. Open Notes.
+8. Locate and click Notes in the macOS Dock.
 9. Use the GUI to locate and click the New Note button.
 10. Paste the extracted content into the note.
 
@@ -129,16 +129,22 @@ Useful flags:
 
 - `--query`
   Text to type into Safari.
+- `--safari-app-prompt`
+  Prompt used to visually locate the Safari app icon.
 - `--search-box-prompt`
   Prompt used to visually locate the Safari address/search bar.
 - `--first-link-prompt`
   Prompt used to visually locate the first result link.
+- `--notes-app-prompt`
+  Prompt used to visually locate the Notes app icon.
 - `--new-note-prompt`
   Prompt used to visually locate the Notes New Note button.
+- `--safari-fullscreen-prompt`
+  Prompt used to visually locate the Safari fullscreen button.
 - `--output-dir`
   Directory for screenshots and JSON artifacts.
 - `--fullscreen`
-  Toggle Safari fullscreen after launch.
+  Click the Safari fullscreen button after launch.
 - `--verify`
   Run vision-based verification after major steps.
 
@@ -154,10 +160,10 @@ python workflow_examples/computer_use_workflow.py \
 
 The implemented demo flow is:
 
-1. Launch Safari.
-2. Optionally fullscreen Safari.
-3. Screenshot the current screen.
-4. Locate the Safari search/address bar from the screenshot.
+1. Screenshot the current screen.
+2. Locate the Safari Dock icon and click it.
+3. Optionally locate the Safari fullscreen button and click it.
+4. Locate the Safari search/address bar from a screenshot.
 5. Translate screenshot coordinates into macOS screen coordinates.
 6. Move the real cursor and click the GUI target.
 7. Search for the configured query.
@@ -167,7 +173,7 @@ The implemented demo flow is:
 11. Move and click that GUI target.
 12. Screenshot the loaded page.
 13. Extract visible stock-related content.
-14. Close Safari and open Notes.
+14. Locate the Notes Dock icon and click it.
 15. Screenshot the Notes window.
 16. Locate the New Note toolbar button.
 17. Move the cursor and click that GUI target.

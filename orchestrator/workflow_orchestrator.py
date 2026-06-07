@@ -116,38 +116,8 @@ class WorkflowOrchestrator:
         LOGGER.info("Verification passed for %s: %s", step.step_name, result.message)
 
     def _execute_action(self, action: StepAction, step: StepArtifact, context: dict[str, str]) -> None:
-        if action.kind == "open_application":
-            if not action.app_name:
-                raise WorkflowError("open_application action requires app_name")
-            self.ui_service.open_application(action.app_name)
-            return
-
-        if action.kind == "activate_application":
-            if not action.app_name:
-                raise WorkflowError("activate_application action requires app_name")
-            self.ui_service.activate_application(action.app_name)
-            return
-
-        if action.kind == "quit_application":
-            if not action.app_name:
-                raise WorkflowError("quit_application action requires app_name")
-            self.ui_service.quit_application(action.app_name)
-            return
-
-        if action.kind == "set_safari_fullscreen":
-            self.ui_service.set_safari_fullscreen()
-            return
-
-        if action.kind == "focus_address_bar":
-            self.ui_service.focus_address_bar()
-            return
-
         if action.kind == "press_return":
             self.ui_service.press_return()
-            return
-
-        if action.kind == "create_new_note":
-            self.ui_service.create_new_note()
             return
 
         if action.kind == "paste_text":

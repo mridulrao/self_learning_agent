@@ -3,14 +3,12 @@ import CoreGraphics
 import Foundation
 
 enum InputAction: String {
-    case move = "move"
-    case click = "click"
     case moveClick = "move-click"
     case screenGeometry = "screen-geometry"
 }
 
 func usage() -> Never {
-    fputs("Usage: swift macos_input.swift <move|click|move-click> <x> <y>\n", stderr)
+    fputs("Usage: swift macos_input.swift <move-click> <x> <y>\n", stderr)
     fputs("   or: swift macos_input.swift screen-geometry\n", stderr)
     exit(2)
 }
@@ -23,11 +21,6 @@ func parseCoordinate(_ value: String) -> CGFloat {
     return CGFloat(parsed)
 }
 
-func makePoint(x: CGFloat, y: CGFloat) -> CGPoint {
-    let screenHeight = NSScreen.main?.frame.height ?? 0
-    return CGPoint(x: x, y: screenHeight - y)
-}
-
 func emitScreenGeometry() -> Never {
     guard let screen = NSScreen.main else {
         fputs("Failed to resolve main screen\n", stderr)
@@ -35,13 +28,9 @@ func emitScreenGeometry() -> Never {
     }
 
     let frame = screen.frame
-    let scale = screen.backingScaleFactor
     let payload: [String: Any] = [
         "width_points": Int(round(frame.width)),
         "height_points": Int(round(frame.height)),
-        "width_pixels": Int(round(frame.width * scale)),
-        "height_pixels": Int(round(frame.height * scale)),
-        "scale_factor": scale,
     ]
 
     do {
@@ -91,21 +80,9 @@ if action == .screenGeometry {
 
 let x = parseCoordinate(arguments[2])
 let y = parseCoordinate(arguments[3])
-let point = makePoint(x: x, y: y)
+let point = CGPoint(x: x, y: y)
 
 switch action {
-case .move:
-    setCursorPosition(point)
-    usleep(50_000)
-    postMouseEvent(type: .mouseMoved, point: point)
-case .click:
-    setCursorPosition(point)
-    usleep(80_000)
-    postMouseEvent(type: .mouseMoved, point: point)
-    usleep(40_000)
-    postMouseEvent(type: .leftMouseDown, point: point)
-    usleep(30_000)
-    postMouseEvent(type: .leftMouseUp, point: point)
 case .moveClick:
     setCursorPosition(point)
     usleep(80_000)

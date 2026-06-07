@@ -31,8 +31,8 @@ class ScreenshotRequest:
 class DisplayGeometry:
     width_points: int
     height_points: int
-    width_pixels: int
-    height_pixels: int
+    screenshot_width_pixels: int
+    screenshot_height_pixels: int
 
 
 class UIAutomationService:
@@ -45,31 +45,6 @@ class UIAutomationService:
         if result.returncode != 0:
             raise WorkflowError(result.stderr.strip() or "AppleScript command failed.")
 
-    def open_application(self, app_name: str) -> None:
-        LOGGER.info("Opening application: %s", app_name)
-        result = self.run_command(["open", "-a", app_name], check=False)
-        if result.returncode != 0:
-            raise WorkflowError(result.stderr.strip() or f"Failed to open {app_name}")
-
-    def quit_application(self, app_name: str) -> None:
-        LOGGER.info("Quitting application: %s", app_name)
-        self.run_applescript(f'tell application "{app_name}" to quit')
-
-    def activate_application(self, app_name: str) -> None:
-        LOGGER.info("Activating application: %s", app_name)
-        self.run_applescript(f'tell application "{app_name}" to activate')
-
-    def set_safari_fullscreen(self) -> None:
-        LOGGER.info("Toggling Safari fullscreen mode.")
-        script = """
-        tell application "Safari" to activate
-        delay 0.5
-        tell application "System Events"
-            keystroke "f" using {command down, control down}
-        end tell
-        """
-        self.run_applescript(script)
-
     def take_screenshot(self, request: ScreenshotRequest) -> Path:
         request.output_dir.mkdir(parents=True, exist_ok=True)
         screenshot_path = request.output_dir / f"{request.step_name}.png"
@@ -80,7 +55,7 @@ class UIAutomationService:
         return screenshot_path
 
     def get_display_geometry(self, screenshot_path: Path) -> DisplayGeometry:
-        width_pixels, height_pixels = self._read_png_size(screenshot_path)
+        screenshot_width_pixels, screenshot_height_pixels = self._read_png_size(screenshot_path)
         result = self.run_command(
             ["swift", str(MACOS_INPUT_SCRIPT), "screen-geometry"],
             check=False,
@@ -101,13 +76,13 @@ class UIAutomationService:
         geometry = DisplayGeometry(
             width_points=width_points,
             height_points=height_points,
-            width_pixels=width_pixels,
-            height_pixels=height_pixels,
+            screenshot_width_pixels=screenshot_width_pixels,
+            screenshot_height_pixels=screenshot_height_pixels,
         )
         LOGGER.info(
-            "Display geometry resolved: %spx x %spx mapped to %spt x %spt",
-            geometry.width_pixels,
-            geometry.height_pixels,
+            "Display geometry resolved: screenshot %spx x %spx, logical display %spt x %spt",
+            geometry.screenshot_width_pixels,
+            geometry.screenshot_height_pixels,
             geometry.width_points,
             geometry.height_points,
         )
@@ -115,16 +90,16 @@ class UIAutomationService:
 
     def translate_coordinates_for_screen(self, screenshot_path: Path, coordinates: Point) -> Point:
         geometry = self.get_display_geometry(screenshot_path)
-        screen_x = round(coordinates.x * geometry.width_points / geometry.width_pixels)
-        screen_y = round(coordinates.y * geometry.height_points / geometry.height_pixels)
+        screen_x = round(coordinates.x * geometry.width_points / geometry.screenshot_width_pixels)
+        screen_y = round(coordinates.y * geometry.height_points / geometry.screenshot_height_pixels)
         LOGGER.info(
             "Translated screenshot coordinates (%s, %s) to screen coordinates (%s, %s) using screenshot size %spx x %spx and screen size %spt x %spt",
             coordinates.x,
             coordinates.y,
             screen_x,
             screen_y,
-            geometry.width_pixels,
-            geometry.height_pixels,
+            geometry.screenshot_width_pixels,
+            geometry.screenshot_height_pixels,
             geometry.width_points,
             geometry.height_points,
         )
@@ -148,30 +123,12 @@ class UIAutomationService:
         """
         self.run_applescript(script)
 
-    def create_new_note(self) -> None:
-        LOGGER.info("Creating a new note with the native keyboard shortcut.")
-        script = """
-        tell application "System Events"
-            keystroke "n" using {command down}
-        end tell
-        """
-        self.run_applescript(script)
-
     def paste_text(self, text: str) -> None:
         LOGGER.info("Pasting note text (%s characters).", len(text))
         subprocess.run(["pbcopy"], input=text, text=True, check=True)
         script = """
         tell application "System Events"
             keystroke "v" using {command down}
-        end tell
-        """
-        self.run_applescript(script)
-
-    def focus_address_bar(self) -> None:
-        LOGGER.info("Focusing the browser address bar.")
-        script = """
-        tell application "System Events"
-            keystroke "l" using {command down}
         end tell
         """
         self.run_applescript(script)
