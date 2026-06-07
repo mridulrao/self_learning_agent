@@ -1,3 +1,6 @@
+"""
+Bootstrap script for downloading and initializing the LocateAnything-3B model.
+"""
 import argparse
 import os
 import sys

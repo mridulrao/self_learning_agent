@@ -21,13 +21,13 @@ The workflow is deterministic in structure, but uses visual grounding for the cl
 
 ## Project Structure
 
-`service/computer_use_workflow.py`
+`workflow_examples/computer_use_workflow.py`
 Main macOS workflow runner. Handles screenshots, coordinate translation, clicking, verification, artifact generation, and the Safari -> Notes demo flow.
 
-`service/macos_input.swift`
+`workflow_examples/macos_input.swift`
 Quartz-based macOS helper for screen-geometry lookup and GUI mouse movement/clicking.
 
-`service/call_locateanything_rpc.py`
+`workflow_examples/call_locateanything_rpc.py`
 Small client for calling the LocateAnything JSON-RPC endpoint.
 
 `model/locateanything/server.py`
@@ -89,7 +89,7 @@ docker run --rm -p 8000:8000 \
   mridulrao/locateanything:v0.0.2
 ```
 
-The workflow expects a LocateAnything JSON-RPC endpoint. By default the helper client uses the endpoint configured in `service/call_locateanything_rpc.py`.
+The workflow expects a LocateAnything JSON-RPC endpoint. By default the helper client uses the endpoint configured in `workflow_examples/call_locateanything_rpc.py`.
 
 ## Vision Model Configuration
 
@@ -122,7 +122,7 @@ Set:
 Run the full Safari -> Notes flow:
 
 ```bash
-python service/computer_use_workflow.py --verify
+python workflow_examples/computer_use_workflow.py --verify
 ```
 
 Useful flags:
@@ -145,7 +145,7 @@ Useful flags:
 Example:
 
 ```bash
-python service/computer_use_workflow.py \
+python workflow_examples/computer_use_workflow.py \
   --query "Top stocks in the US" \
   --verify
 ```
@@ -179,7 +179,7 @@ The implemented demo flow is:
 The workflow uses:
 
 - screenshot pixel dimensions from the captured PNG
-- live macOS display geometry from `service/macos_input.swift`
+- live macOS display geometry from `workflow_examples/macos_input.swift`
 
 It translates screenshot-space points into screen-space points before clicking.
 
@@ -193,7 +193,7 @@ This turned out to be important for Notes toolbar interactions, where synthetic 
 
 ## Debug Artifacts
 
-Artifacts are written under [service/artifacts](/Users/mridulrao/Downloads/psuedo_desktop/computer_use/service/artifacts) by default.
+Artifacts are written under [workflow_examples/artifacts](/Users/mridulrao/Downloads/psuedo_desktop/computer_use/workflow_examples/artifacts) by default.
 
 For each step, the workflow writes a JSON artifact. For click-target steps it also writes a debug screenshot:
 
@@ -224,7 +224,7 @@ This means the Swift helper has an enum case that was not handled in the action 
 
 ### Cursor lands correctly but the button does not activate
 
-This is usually not a coordinate-mapping problem. It is often caused by how the click event is delivered to macOS. Use the latest `service/macos_input.swift`, which warps the real cursor before clicking.
+This is usually not a coordinate-mapping problem. It is often caused by how the click event is delivered to macOS. Use the latest `workflow_examples/macos_input.swift`, which warps the real cursor before clicking.
 
 ### No screenshots captured
 

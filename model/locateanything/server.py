@@ -1,3 +1,6 @@
+"""
+FastAPI server for the LocateAnything model.
+"""
 from typing import Any, Literal
 
 from fastapi import FastAPI

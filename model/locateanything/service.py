@@ -1,3 +1,6 @@
+"""
+Service for the LocateAnything model. It takes in the screenshot and prompt and returns the bounding box or point coordinates.
+"""
 import base64
 import io
 import math
